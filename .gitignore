@@ -1,0 +1,17 @@
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# OS Files
+.DS_Store
+
+# Internal documentation
+.internal/
