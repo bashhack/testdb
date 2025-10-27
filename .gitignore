@@ -13,5 +13,9 @@ coverage.html
 # OS Files
 .DS_Store
 
+# Environment files
+.env
+.envrc
+
 # Internal documentation
 .internal/
