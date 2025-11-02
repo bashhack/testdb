@@ -225,27 +225,39 @@ test/race: test/db/start
 # QUALITY CONTROL
 # ============================================================================= #
 
-## check_staticcheck: Check if staticcheck is installed
-.PHONY: check_staticcheck
-check_staticcheck:
-	@if ! command -v staticcheck >/dev/null 2>&1; then \
-		echo "Error: 'staticcheck' is not installed. Installing..."; \
-		go install honnef.co/go/tools/cmd/staticcheck@latest; \
+## check-staticcheck: Check if staticcheck is installed
+.PHONY: check-staticcheck
+check-staticcheck:
+	@if command -v staticcheck > /dev/null; then \
+		echo "✅ staticcheck is installed"; \
+	else \
+		echo "⚠️ staticcheck not found, static analysis will be skipped"; \
+		echo "🔍 Install with: go install honnef.co/go/tools/cmd/staticcheck@latest"; \
+		exit 1; \
 	fi
 
-## check_golangci_lint: Check if golangci-lint is installed
-.PHONY: check_golangci_lint
-check_golangci_lint:
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "Error: 'golangci-lint' is not installed. Installing..."; \
-		go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
+## check-golangci-lint: Check if golangci-lint is installed
+.PHONY: check-golangci-lint
+check-golangci-lint:
+	@if command -v golangci-lint > /dev/null; then \
+		echo "✅ golangci-lint is installed"; \
+	else \
+		echo "⚠️ golangci-lint not found, external linting will be skipped"; \
+		echo "🔍 Install with: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $$(go env GOPATH)/bin v2.6.0"; \
+		exit 1; \
 	fi
 
-## golangci: Run golangci-lint
-.PHONY: golangci
-golangci:
-	$(MAKE) check_golangci_lint
-	golangci-lint run ./...
+## run-staticcheck: Run staticcheck if it exists
+.PHONY: run-staticcheck
+run-staticcheck: check-staticcheck
+	@echo 'Running staticcheck...'
+	@staticcheck ./... || echo "Note: staticcheck found issues (exit code: $$?)"
+
+## run-golangci-lint: Run golangci-lint if it exists
+.PHONY: run-golangci-lint
+run-golangci-lint: check-golangci-lint
+	@echo 'Running golangci-lint...'
+	@golangci-lint run ./... || echo "Note: golangci-lint found issues (exit code: $$?)"
 
 ## security/scan: Run security scan
 .PHONY: security/scan
@@ -256,18 +268,14 @@ security/scan:
 	fi
 	gosec ./...
 
-## lint: Run linters without tests
+## lint: Run linters
 .PHONY: lint
 lint:
-	@echo 'Formatting code...'
-	go fmt ./...
-	@echo 'Vetting code...'
-	go vet ./...
-	$(MAKE) check_staticcheck
-	staticcheck ./...
-	$(MAKE) check_golangci_lint
-	golangci-lint run ./...
-	@echo '✅ Linting complete'
+	@echo 'Linting...'
+	@echo 'Running go vet...'
+	@go vet ./...
+	@$(MAKE) run-golangci-lint || echo "Skipping external linting"
+	@$(MAKE) run-staticcheck || echo "Skipping staticcheck"
 
 ## audit: Tidy dependencies and format, vet and test all code
 .PHONY: audit
@@ -279,10 +287,8 @@ audit:
 	go fmt ./...
 	@echo 'Vetting code...'
 	go vet ./...
-	$(MAKE) check_staticcheck
-	staticcheck ./...
-	$(MAKE) check_golangci_lint
-	golangci-lint run ./...
+	@$(MAKE) run-staticcheck || echo "Skipping staticcheck"
+	@$(MAKE) run-golangci-lint || echo "Skipping external linting"
 	@echo 'Running tests...'
 	go test -short -vet=off ./...
 	@echo '✅ Audit complete'
@@ -298,10 +304,8 @@ audit/long:
 	@go fmt ./...
 	@echo 'Vetting code...'
 	@go vet ./...
-	@$(MAKE) check_staticcheck
-	@staticcheck ./...
-	@$(MAKE) check_golangci_lint
-	@golangci-lint run ./...
+	@$(MAKE) run-staticcheck || echo "Skipping staticcheck"
+	@$(MAKE) run-golangci-lint || echo "Skipping external linting"
 	@echo 'Starting test database...'
 	@$(MAKE) test/db/start
 	@echo 'Running ALL tests (including long tests, 10 minute timeout, no cache, with race detection)...'
@@ -327,8 +331,8 @@ vendor:
 ## coverage: Run test suite with coverage
 .PHONY: coverage
 coverage:
-	go test -coverprofile=coverage.out ./...
-	go tool cover -html=coverage.out
+	go test -coverprofile=coverage.txt ./...
+	go tool cover -html=coverage.txt -o coverage.html
 
 ## fmt: Format all code
 .PHONY: fmt

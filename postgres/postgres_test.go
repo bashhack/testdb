@@ -1177,18 +1177,14 @@ func TestCleanupStress(t *testing.T) {
 
 			ctx := context.Background()
 			var wg sync.WaitGroup
-			for j := range 3 {
+			for range 3 {
 				wg.Add(1)
-				go func(queryNum int) {
+				go func() {
 					defer wg.Done()
 					var result string
-					err := pool.QueryRow(ctx, "SELECT pg_sleep(10)").Scan(&result)
-					if err != nil {
-						t.Logf("query %d interrupted (expected): %v", queryNum, err)
-					} else {
-						t.Logf("query %d completed (unexpected)", queryNum)
-					}
-				}(j)
+					_ = pool.QueryRow(ctx, "SELECT pg_sleep(10)").Scan(&result)
+					// ...test may have completed (intentional race condition)
+				}()
 			}
 
 			// Don't wait for queries - let t.Cleanup() race with active connections.
