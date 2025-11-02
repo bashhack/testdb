@@ -47,25 +47,28 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
 
-      - name: Install dependencies
-        run: go mod download
+      - name: Cache Go tools
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: ~/go/bin
+          key: ${{ runner.os }}-go-tools-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-go-tools-
 
-      - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+      - name: Install tools
+        run: |
+          command -v staticcheck || go install honnef.co/go/tools/cmd/staticcheck@latest
+          command -v tern || go install github.com/jackc/tern/v2@latest
+          command -v goose || go install github.com/pressly/goose/v3/cmd/goose@latest
+          command -v migrate || go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9
+        uses: golangci/golangci-lint-action@971e284b6050e8a5849b72094c50ab08da042db8
         with:
-          version: v2.6.0
+          version: latest
 
       - name: Run linters
         run: make lint
-
-      - name: Install migration tools
-        run: |
-          go install github.com/jackc/tern/v2@latest
-          go install github.com/pressly/goose/v3/cmd/goose@latest
-          go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
       - name: Run unit tests and generate coverage
         run: |
