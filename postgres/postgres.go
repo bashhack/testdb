@@ -94,14 +94,17 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bashhack/testdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -172,13 +175,37 @@ func (p *PostgresProvider) CreateDatabase(ctx context.Context, name string) erro
 }
 
 // DropDatabase drops a PostgreSQL database if it exists.
+// Retries on SQLSTATE 55006 to handle the race where pg_terminate_backend() has sent
+// termination signals but connections haven't fully closed yet. This is especially
+// important under high concurrency when multiple databases are being dropped simultaneously.
 func (p *PostgresProvider) DropDatabase(ctx context.Context, name string) error {
 	quotedName := pgx.Identifier{name}.Sanitize()
-	_, err := p.conn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", quotedName))
-	if err != nil {
+
+	// Retry for "database is being accessed by other users" (SQLSTATE 55006)
+	var lastErr error
+	for attempt := range 3 {
+		_, err := p.conn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", quotedName))
+		if err == nil {
+			return nil
+		}
+
+		// Check for "database is being accessed" error
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55006" {
+			lastErr = err
+			if attempt < 2 {
+				// Exponential backoff: 10ms, 40ms
+				sleepDuration := time.Duration(10*(1<<(attempt*2))) * time.Millisecond
+				time.Sleep(sleepDuration)
+				continue
+			}
+		}
+
+		// Non-retryable errors...
 		return fmt.Errorf("drop database: %w", err)
 	}
-	return nil
+
+	return fmt.Errorf("drop database after retries: %w", lastErr)
 }
 
 // TerminateConnections forcefully terminates all connections to the specified database.
