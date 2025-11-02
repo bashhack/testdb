@@ -1252,7 +1252,8 @@ func TestCleanupStress_SingleValidation(t *testing.T) {
 				errorsMu.Lock()
 				queryErrors = append(queryErrors, err)
 				errorsMu.Unlock()
-				t.Logf("query %d interrupted: %v", queryNum, err)
+				// ...goroutine may outlive the test (data race)
+				// Errors are validated in t.Cleanup() after goroutines complete
 			}
 		}(j)
 	}
