@@ -72,6 +72,9 @@ type TestDatabase struct {
 	// cleanup is the function called by Close() to clean up resources.
 	cleanup func() error
 
+	// keep makes Close leave the database in place; see Keep.
+	keep bool
+
 	// t is the testing context for logging.
 	t testingHelper
 
@@ -358,17 +361,22 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 	}
 
 	td.cleanup = func() error {
-		if err := provider.TerminateConnections(cleanupCtx, dbName); err != nil {
-			return &Error{
-				Op:  "provider.TerminateConnections",
-				Err: err,
+		if td.keep {
+			// Always worth saying, since someone asked to look at it
+			t.Logf("testdb: kept database %s for inspection:\n    psql %q", dbName, testDSN)
+		} else {
+			if err := provider.TerminateConnections(cleanupCtx, dbName); err != nil {
+				return &Error{
+					Op:  "provider.TerminateConnections",
+					Err: err,
+				}
 			}
-		}
 
-		if err := provider.DropDatabase(cleanupCtx, dbName); err != nil {
-			return &Error{
-				Op:  "provider.DropDatabase",
-				Err: err,
+			if err := provider.DropDatabase(cleanupCtx, dbName); err != nil {
+				return &Error{
+					Op:  "provider.DropDatabase",
+					Err: err,
+				}
 			}
 		}
 
@@ -379,7 +387,7 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 			}
 		}
 
-		if cfg.Verbose {
+		if cfg.Verbose && !td.keep {
 			t.Logf("testdb: dropped database %s", dbName)
 		}
 		return nil
@@ -429,6 +437,21 @@ func (td *TestDatabase) logf(format string, args ...any) {
 	if td.config.Verbose {
 		td.t.Logf(format, args...)
 	}
+}
+
+// Keep makes Close leave the database in place instead of dropping it, and
+// log a connection string for it. The provider's own resources are still
+// released. postgres.Setup and postgres.New call this for a failed test when
+// KeepOnFailure is set; with the low-level API you decide:
+//
+//	db, err := testdb.New(t, provider, nil)
+//	...
+//	if t.Failed() {
+//	    db.Keep()
+//	}
+//	db.Close()
+func (td *TestDatabase) Keep() {
+	td.keep = true
 }
 
 // Close cleans up the test database and associated resources.

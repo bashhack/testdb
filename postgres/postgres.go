@@ -330,6 +330,7 @@ func runMigrationsIfConfigured(t testing.TB, db *testdb.TestDatabase, callerName
 }
 
 // registerCleanup registers cleanup that closes the connection pool before dropping the database.
+// With KeepOnFailure, a failed test's database is kept for inspection instead.
 func registerCleanup(t testing.TB, db *testdb.TestDatabase) {
 	t.Cleanup(func() {
 		// Close the pool/connection if it implements io.Closer
@@ -339,6 +340,10 @@ func registerCleanup(t testing.TB, db *testdb.TestDatabase) {
 					t.Logf("Warning: failed to close entity: %v", err)
 				}
 			}
+		}
+
+		if db.Config().KeepOnFailure && t.Failed() {
+			db.Keep()
 		}
 
 		// Drop database (TerminateConnections handles any remaining connections)
