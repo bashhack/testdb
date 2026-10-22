@@ -1,6 +1,6 @@
 # testdb
 
-> True database isolation for Go tests using PostgreSQL's `CREATE DATABASE`. No Docker required.
+> Real database isolation for Go tests, fast enough to use for every test. One database per test on PostgreSQL or MySQL, cloned from a template in milliseconds. No Docker required.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/bashhack/testdb.svg)](https://pkg.go.dev/github.com/bashhack/testdb)
 
@@ -8,8 +8,9 @@
 
 - **True Isolation** - Each test gets its own database
 - **Parallel Tests** - Run tests concurrently with `t.Parallel()`
-- **Zero Docker** - Uses native PostgreSQL CREATE DATABASE
-- **Auto Cleanup** - Databases are dropped automatically
+- **Zero Docker** - Connects to a PostgreSQL or MySQL server you already run
+- **Templates** - Build the schema once per run, clone it per test; safe to share between test packages and CI jobs
+- **Auto Cleanup** - Databases are dropped automatically; keep a failed test's on request
 - **Migration Support** - goose, tern and golang-migrate through their Go libraries, or plain SQL files; nothing to install
 - **PostgreSQL and MySQL** - The same API and the same guarantees on both; pgxpool for PostgreSQL, database/sql for MySQL
 
@@ -61,15 +62,26 @@ That's it! Each test gets an isolated database with your schema ready.
 
 ## Why testdb?
 
-testdb uses PostgreSQL's native `CREATE DATABASE` to give each test its own isolated database.
+Two things, together: every test gets a real database of its own, and getting one is cheap enough to do for every test.
 
-**Complete isolation** - Each test gets an actual database, not a transaction or schema. Test transactions, DDL, concurrent operations - anything your application does in production.
+**Real isolation.** Each test runs against its own database, not a shared one wrapped in a transaction or scrubbed between tests. Commits, DDL, concurrent connections, locks, triggers: whatever your application does in production, the test does for real, and `t.Parallel()` is safe because there is nothing to share.
 
-**Simple setup** - Works with your existing PostgreSQL server. No containers to orchestrate, no Docker daemon required.
+**At clone speed.** A template holds your schema and fixtures, built once per run; each test gets a clone. On PostgreSQL that is ~15 ms whatever the template holds. On MySQL, which has no way to clone a database, clones are prepared ahead of demand and a test takes one in ~6 ms. Without a template, a fresh database costs tens of milliseconds plus whatever your migrations cost.
 
-**True parallelism** - Run hundreds of tests concurrently with `t.Parallel()`. Each test has its own database, eliminating coordination complexity.
+**Safe to share.** `go test ./...` runs packages as separate processes, and CI runs jobs side by side. A template is built once, reused by every process, dropped by the last one out, and never left half-built or stranded by a crash. Multi-process tests, including a process killed mid-run, prove it on both databases.
 
-**Standard tooling** - Use the migrations you already have, run through goose, tern or golang-migrate's own Go libraries. No binaries on PATH, no version drift between CI and laptops.
+**Nothing to install.** Migrations run through goose, tern or golang-migrate's own Go libraries, or from plain SQL files. No binaries on PATH, no version drift between CI and laptops, no Docker daemon: it connects to a PostgreSQL or MySQL server you already run.
+
+**The same on every database it supports.** A database is listed here only when it meets the whole bar: isolation, templates with the same API and guarantees, migrators, keep-on-failure, and its own measured numbers.
+
+### Compared with the alternatives
+
+| | isolation | cost per test | `t.Parallel()` |
+|---|---|---|---|
+| Shared database, truncate between tests | none: state, DDL and commits are shared | low | unsafe |
+| Transaction rolled back per test | partial: no commits, no second connection, no DDL | low | unsafe against one database |
+| Fresh database + migrations per test | full | your migrations, every test | safe |
+| **testdb** | full | ~15 ms PostgreSQL, ~6 ms MySQL (prepared) | safe, across processes too |
 
 **Shared database approach:**
 ```go
@@ -122,7 +134,7 @@ pool := postgres.Setup(t,
 ```
 
 Available options:
-- `WithMigrator(m)` - How each new database is prepared: a migration-tool adapter, `postgres.SQLFiles(dir)`, or any `func(ctx, dsn) error`
+- `WithMigrator(m)` - How each new database is prepared: a migration-tool adapter, `postgres.SQLFiles(dir)` / `mysql.SQLFiles(dir)`, or any `func(ctx, dsn) error`
 - `WithTemplate(name)` - Clone a template database instead of starting empty (see Templates)
 - `WithAdminDSN(dsn)` - Override admin connection string
 - `WithDBPrefix(prefix)` - Database name prefix (default: "test")
@@ -149,7 +161,7 @@ Passing tests still clean up after themselves. The same switch exists in code as
 
 ### Built-in Initializers
 
-testdb provides two built-in initializers for PostgreSQL:
+testdb provides two built-in initializers for PostgreSQL, and `mysql.SQLDBInitializer` (a `*sql.DB`, what `mysql.Setup` uses) for MySQL:
 
 #### PoolInitializer (Default)
 
@@ -300,7 +312,7 @@ The admin connection string may be in go-sql-driver's native form (`user:pass@tc
 
 Two things about MySQL that testdb handles for you. `DROP DATABASE` does not refuse while other sessions are connected, it waits for the locks they hold (by default, for a year); cleanup kills the test's sessions first and bounds the wait at five seconds, so a leaked transaction can never hang a test run. And a MySQL database with 50 tables takes about half a second to create however you do it, so for speed see [Templates on MySQL](#templates-on-mysql).
 
-For the fastest possible test server, start it without durability, as `docker-compose.test.yml` does: `--innodb-flush-log-at-trx-commit=0 --sync-binlog=0 --skip-log-bin --innodb-doublewrite=0`. Tested against MySQL 8.4; MariaDB is likely to work but is not tested.
+For the fastest possible test server, start it without durability, as `docker-compose.test.yml` does: `--innodb-flush-log-at-trx-commit=0 --sync-binlog=0 --skip-log-bin --innodb-doublewrite=0`. Tested in CI against MySQL 8.4 and MariaDB 11.4.
 
 Other databases can be added by implementing `testdb.Provider`, plus `testdb.TemplateProvider` for templates.
 
@@ -404,7 +416,7 @@ func TestUsers(t *testing.T) {
 - `Release` drops the template only when the last process using it is done. A process that crashes drops out of the count on its own, because its claim on the template dies with its connection.
 - The template is a real PostgreSQL template (`IS_TEMPLATE true`), so a stray `DROP DATABASE` is refused.
 
-Everything sharing a template must use the same admin database; that is where the coordination happens.
+Everything sharing a template must use the same admin database; that is where the coordination happens. These are the PostgreSQL mechanics; MySQL gives the same guarantees by other means, see [Templates on MySQL](#templates-on-mysql).
 
 ### Keeping Templates Between Runs
 
@@ -468,10 +480,10 @@ postgres.EnsureTemplate(ctx, "full",
 
 `mysql.EnsureTemplate`, `Release`, `WithFingerprint`, `WithKeepTemplate` and `testdb.WithTemplate` work exactly as above, with the same guarantees across processes. What differs is underneath, because MySQL has no way to clone a database:
 
-- A clone is made object by object: tables (indexes, foreign keys, checks, `AUTO_INCREMENT` positions), rows, views, triggers, procedures and functions. Not copied: events and grants.
-- That clone costs the server's per-table DDL, about 0.5–0.8 s for a 50-table schema on a laptop, no faster than running the migrations. So a MySQL template **prepares clones ahead of demand**: `WithReadyDatabases(n)` (default `GOMAXPROCS`) keeps `n` databases cloned and ready, refilled in the background by `WithReadyWorkers` parallel workers, and a test takes one instead of waiting. When the pool runs dry, the test clones on demand rather than wait.
+- A clone is made object by object: tables (indexes, foreign keys, checks, `AUTO_INCREMENT` positions), rows, views, triggers, procedures and functions. Deliberately not copied: events (a scheduler job firing inside a test's clone would make the test nondeterministic) and grants (tests connect as the admin user). `DEFINER` clauses are dropped, so objects belong to whoever runs the clone, and a foreign key to a table in another database keeps pointing there.
+- That clone costs the server's per-table DDL, about 0.5–0.8 s for a 50-table schema on an M5 MacBook Air, no faster than running the migrations. So a MySQL template **prepares clones ahead of demand**: `WithReadyDatabases(n)` (default `GOMAXPROCS`) keeps `n` databases cloned and ready, refilled in the background by `WithReadyWorkers` parallel workers, and a test takes one instead of waiting. `EnsureTemplate` fills the pool once before it returns, so the first test already finds it full (`WithReadyWarmup(false)` to skip that). When the pool runs dry, the test clones on demand rather than wait; the pool size is also how many back-to-back quick tests it absorbs.
 
-Measured on MySQL 8.4 in Docker on a laptop, 50 tables with an index each, 5,000 rows:
+Measured on MySQL 8.4 in Docker on an M5 MacBook Air (durability off, as in `docker-compose.test.yml`), 50 tables with an index each, 5,000 rows:
 
 | | per test |
 |---|---|
@@ -504,8 +516,11 @@ func TestMain(m *testing.M) {
 
     code := m.Run()
 
-    us.Release(ctx)
-    eu.Release(ctx)
+    for _, tpl := range []*postgres.Template{us, eu} {
+        if err := tpl.Release(ctx); err != nil {
+            log.Print(err)
+        }
+    }
     os.Exit(code)
 }
 
@@ -522,15 +537,15 @@ func TestEUVAT(t *testing.T) {
 
 ## How It Works
 
-testdb leverages PostgreSQL's `CREATE DATABASE` command for true isolation:
+For each test:
 
-1. **Generates unique name** - Combines prefix, nanosecond timestamp, and random suffix: `test_1699564231_a1b2c3d4`
-2. **Creates database** - Executes `CREATE DATABASE` via admin connection to `postgres` database
-3. **Runs migrations** - If configured, executes the specified migration tool against the new database
-4. **Returns connection** - Initializes a database connection using the specified initializer (e.g., *pgxpool.Pool, *sql.DB, or custom type)
-5. **Registers cleanup** - Uses `t.Cleanup()` to ensure cleanup even if test panics
-6. **Terminates connections** - On cleanup, forcefully closes all connections via `pg_terminate_backend`
-7. **Drops database** - Executes `DROP DATABASE` to remove the test database
+1. **A unique name** - prefix, nanosecond timestamp and a random suffix: `test_1699564231_a1b2c3d4`
+2. **A database** - `CREATE DATABASE`, or a clone of a template: PostgreSQL's `CREATE DATABASE … TEMPLATE`, or on MySQL a clone the template prepared ahead
+3. **Migrations** - the configured migrator runs against the new database, under the test's context
+4. **A connection** - the initializer opens one: `*pgxpool.Pool` or `*sql.DB` by default, or your own type
+5. **Cleanup registered** - `t.Cleanup()` runs it even if the test panics
+6. **Other sessions ended** - `pg_terminate_backend` on PostgreSQL, `KILL CONNECTION` on MySQL, so the drop cannot be blocked
+7. **The database dropped** - unless the test failed and you asked to keep it
 
 ## Examples
 
@@ -543,11 +558,11 @@ See [postgres/example_test.go](postgres/example_test.go) for runnable examples d
 - Using GORM and other ORMs
 - Working with database/sql
 
-All examples are also visible in the [package documentation](https://pkg.go.dev/github.com/bashhack/testdb/postgres).
+All examples are also visible in the [package documentation](https://pkg.go.dev/github.com/bashhack/testdb/postgres). The MySQL package's examples, in [mysql/example_test.go](mysql/example_test.go), are compile-checked rather than run, since they cannot skip when no MySQL server is reachable.
 
 ## Requirements
 
-- PostgreSQL server running locally or accessible
+- A PostgreSQL or MySQL server, local or reachable
 - Go 1.27+
 
 ## License
