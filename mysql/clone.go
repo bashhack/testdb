@@ -16,6 +16,12 @@ import (
 // then views, triggers, procedures and functions from their SHOW CREATE
 // forms. Tables named _testdb_* hold testdb's own bookkeeping inside a
 // template and are not copied.
+//
+// Deliberately not copied: events (a scheduler job firing inside a test's
+// clone would make the test nondeterministic) and grants (tests connect as
+// the admin user). DEFINER clauses are dropped, so objects belong to
+// whoever runs the clone. A foreign key that references a table in another
+// database keeps pointing at that database.
 
 // bookkeepingPrefix names the tables testdb keeps inside a template.
 const bookkeepingPrefix = "_testdb_"

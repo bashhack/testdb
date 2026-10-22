@@ -121,7 +121,7 @@ func BenchmarkTemplateReady(b *testing.B) {
 				schemaDir := writeBenchSchema(b)
 				tpl := ensureBenchTemplate(b, "bench_mysql_tpl_ready", schemaDir,
 					mysql.WithReadyDatabases(8), mysql.WithReadyWorkers(workers), mysql.WithReadyPrefix("bench_ready"))
-				time.Sleep(6 * time.Second) // let the pool fill once
+				// EnsureTemplate warms the pool before returning
 				pooled := 0
 				b.ReportAllocs()
 				for b.Loop() {

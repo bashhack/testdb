@@ -71,6 +71,7 @@ type templateConfig struct {
 	ready        int
 	readyWorkers int
 	readyPrefix  string
+	warmup       bool
 }
 
 // WithFingerprint identifies the template's content, typically a hash of the
@@ -103,11 +104,22 @@ func WithTemplateAdminDSN(dsn string) TemplateOption {
 // default is runtime.GOMAXPROCS(0), which is also go test's default
 // -parallel. 0 disables the pool: every test clones on demand.
 //
-// The pool keeps up as long as tests take clones no faster than the
-// workers (see WithReadyWorkers) can make them. When it runs dry, a test
-// clones on demand rather than wait.
+// EnsureTemplate fills the pool once before returning (see
+// WithReadyWarmup), so the first tests find it full. After that it keeps
+// up as long as tests take clones no faster than the workers (see
+// WithReadyWorkers) can make them; the pool size is also the number of
+// back-to-back quick tests it can absorb. When it runs dry, a test clones
+// on demand rather than wait.
 func WithReadyDatabases(n int) TemplateOption {
 	return func(c *templateConfig) { c.ready = n }
+}
+
+// WithReadyWarmup sets whether EnsureTemplate waits for the pool to fill
+// before returning. On by default: it costs one round of parallel clones,
+// once, and means every test from the first finds a prepared database.
+// Turn it off to start tests immediately and let the pool fill alongside.
+func WithReadyWarmup(on bool) TemplateOption {
+	return func(c *templateConfig) { c.warmup = on }
 }
 
 // WithReadyWorkers sets how many clones are made in parallel to keep the
@@ -154,7 +166,7 @@ func EnsureTemplate(ctx context.Context, name string, setup SetupFunc, opts ...T
 	if err := validateTemplateName(name); err != nil {
 		return nil, fmt.Errorf("mysql.EnsureTemplate: %w", err)
 	}
-	cfg := templateConfig{ready: runtime.GOMAXPROCS(0), readyPrefix: "test"}
+	cfg := templateConfig{ready: runtime.GOMAXPROCS(0), readyPrefix: "test", warmup: true}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -180,6 +192,14 @@ func EnsureTemplate(ctx context.Context, name string, setup SetupFunc, opts ...T
 			return tpl, nil
 		}
 		tpl.pool = pool
+		if cfg.warmup {
+			if err := pool.waitFull(ctx); err != nil {
+				// ctx ended mid warm-up: nobody gets the handle, so let go of
+				// the template properly
+				err = errors.Join(err, tpl.Release(context.WithoutCancel(ctx)))
+				return nil, fmt.Errorf("mysql.EnsureTemplate %q: warm up prepared databases: %w", name, err)
+			}
+		}
 	}
 	return tpl, nil
 }

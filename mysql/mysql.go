@@ -19,7 +19,9 @@
 // or a mysql://user:pass@host:port/db?params URL. The user needs CREATE and
 // DROP DATABASE and the right to kill other sessions (CONNECTION_ADMIN).
 //
-// Templates are not available for MySQL yet; see testdb.TemplateProvider.
+// Templates (EnsureTemplate) build the schema once and hand each test a
+// clone prepared ahead of time, which is where MySQL's speed comes from;
+// see Template and WithReadyDatabases.
 package mysql
 
 import (

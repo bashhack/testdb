@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/bashhack/testdb"
 )
@@ -59,6 +60,29 @@ func startReadyPool(tpl *Template, size, workers int) (*readyPool, error) {
 		pool.wg.Go(pool.work)
 	}
 	return pool, nil
+}
+
+// waitFull blocks until the pool holds its full number of prepared
+// databases, the workers have given up, or ctx ends.
+func (p *readyPool) waitFull(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if len(p.ready) == cap(p.ready) {
+			return nil
+		}
+		p.mu.Lock()
+		failed := p.failure != nil
+		p.mu.Unlock()
+		if failed {
+			return nil // already logged; tests will clone on demand
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // take returns a prepared database, or false without waiting.
