@@ -205,7 +205,7 @@ check-golangci-lint:
 		echo "✅ golangci-lint is installed"; \
 	else \
 		echo "⚠️ golangci-lint not found, external linting will be skipped"; \
-		echo "🔍 Install with: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $$(go env GOPATH)/bin v2.6.0"; \
+		echo "🔍 Install with: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $$(go env GOPATH)/bin v2.15.0"; \
 		exit 1; \
 	fi
 
