@@ -553,9 +553,14 @@ func lockName(template string) string {
 	return "testdb:template:" + hex.EncodeToString(sum[:12])
 }
 
+// buildLockTimeout bounds GET_LOCK when ctx has no deadline. MySQL treats a
+// negative timeout as "forever" but MariaDB returns NULL for it, so a long
+// finite wait is used on both; ctx still cancels the statement earlier.
+const buildLockTimeout = 24 * time.Hour
+
 // lockBuild takes the template's build lock, waiting as long as ctx allows.
 func lockBuild(ctx context.Context, conn *sql.Conn, template string) error {
-	timeout := -1 // forever, as far as MySQL is concerned; ctx still applies
+	timeout := int(buildLockTimeout.Seconds())
 	if deadline, ok := ctx.Deadline(); ok {
 		timeout = max(int(time.Until(deadline).Seconds()), 1)
 	}

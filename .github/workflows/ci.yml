@@ -103,3 +103,38 @@ jobs:
         with:
           files: ./coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  test-mariadb:
+    name: MySQL suite on MariaDB
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+        ports:
+          - 3306:3306
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.27'
+          cache: true
+
+      # The mysql package and the adapters' MySQL tests, against MariaDB on
+      # the default MySQL address. The Postgres-backed tests are the other
+      # job's business.
+      - name: Run the MySQL-backed tests against MariaDB
+        run: |
+          go test -race -count=1 ./mysql/...
+          go test -race -count=1 -run 'TestMySQL' ./migrate/goose/... ./migrate/golangmigrate/...
