@@ -123,7 +123,24 @@ Available options:
 - `WithTemplate(name)` - Clone a template database instead of starting empty (see Templates)
 - `WithAdminDSN(dsn)` - Override admin connection string
 - `WithDBPrefix(prefix)` - Database name prefix (default: "test")
+- `WithKeepOnFailure()` - Keep a failed test's database for inspection (see below)
 - `WithVerbose()` - Enable verbose logging for debugging
+
+### Looking at a Failed Test's Database
+
+By default every test database is dropped, pass or fail. When a test fails and you want to see what it left behind, keep its database:
+
+```bash
+TESTDB_KEEP_ON_FAILURE=1 go test ./... -run TestCheckout
+```
+
+```
+    checkout_test.go:42: expected 2 orders, got 1
+    testdb: kept database test_1761100000_a1b2c3d4 for inspection:
+        psql "postgres://postgres:postgres@localhost:5432/test_1761100000_a1b2c3d4?sslmode=disable"
+```
+
+Passing tests still clean up after themselves. The same switch exists in code as `testdb.WithKeepOnFailure()`, and with the low-level `testdb.New` you call `db.Keep()` yourself. Kept databases are yours to drop afterwards; a `WithDBPrefix` makes them easy to find. Leave this off in CI, where nobody will look and the databases would only pile up.
 
 ## Advanced Usage
 

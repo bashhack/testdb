@@ -1447,6 +1447,9 @@ func (s *spyTB) Logf(format string, args ...any) {
 
 func (s *spyTB) Helper() {}
 
+// Failed reports the spy's own failure state, not the enclosing test's
+func (s *spyTB) Failed() bool { return s.failed }
+
 func (s *spyTB) Cleanup(f func()) {
 	s.cleanups = append(s.cleanups, f)
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -58,6 +59,14 @@ type Config struct {
 	//
 	// Default: false
 	Verbose bool
+
+	// KeepOnFailure leaves a test's database in place when the test fails,
+	// and logs a connection string for it, so the data can be inspected.
+	// See WithKeepOnFailure.
+	//
+	// Default: false, or true when the TESTDB_KEEP_ON_FAILURE environment
+	// variable is set to 1, true, yes or on.
+	KeepOnFailure bool
 }
 
 // Migrator prepares a freshly created, empty database: it runs migrations,
@@ -167,10 +176,43 @@ func WithVerbose() Option {
 	}
 }
 
+// WithKeepOnFailure keeps a test's database when the test fails, instead of
+// dropping it, and logs a psql command for it. Passing tests still have their
+// databases dropped. Use it to look at the data a failing test left behind.
+//
+// The TESTDB_KEEP_ON_FAILURE environment variable (1, true, yes or on) turns
+// this on for a whole run without changing code:
+//
+//	TESTDB_KEEP_ON_FAILURE=1 go test ./... -run TestCheckout
+//
+// Kept databases are yours to drop afterwards; WithDBPrefix makes them easy
+// to spot. Leave this off in CI, where nobody is going to look and the
+// databases would only pile up.
+func WithKeepOnFailure() Option {
+	return func(c *Config) {
+		c.KeepOnFailure = true
+	}
+}
+
+// KeepOnFailureEnv is the environment variable that turns on KeepOnFailure
+// for a run.
+const KeepOnFailureEnv = "TESTDB_KEEP_ON_FAILURE"
+
 // DefaultConfig returns a Config with reasonable defaults.
 func DefaultConfig() Config {
 	return Config{
-		DBPrefix: "test",
+		DBPrefix:      "test",
+		KeepOnFailure: envBool(KeepOnFailureEnv),
+	}
+}
+
+// envBool reports whether an environment variable is set to a true-ish value.
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
