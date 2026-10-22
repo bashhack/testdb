@@ -563,7 +563,7 @@ All examples are also visible in the [package documentation](https://pkg.go.dev/
 ## Requirements
 
 - A PostgreSQL or MySQL server, local or reachable
-- Go 1.27+
+- Go 1.26 or later
 
 ## License
 
