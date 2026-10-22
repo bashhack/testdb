@@ -314,119 +314,137 @@ postgres.Setup(t,
 
 ## Templates
 
-Templates allow you to create a database once and clone it for each test. This avoids repeatedly running migrations or loading fixture data.
-
-### When to Use Templates
-
-Use templates when:
-- Your migrations are slow to run
-- You have large SQL fixture files to load
-- You need the same database setup for many tests
+A template is a database you build once, from migrations, a SQL dump or any Go code, that each test then clones in a few milliseconds. Use one when migrations are slow, when you load large fixture files, or when many tests need the same starting data.
 
 ### Basic Template Usage
 
-Create templates in `TestMain` and use them in individual tests:
+Ensure the template in `TestMain`, use it in tests, release it when the run ends:
 
 ```go
 func TestMain(m *testing.M) {
     ctx := context.Background()
 
-    // Create template once with migrations
-    postgres.CreateTemplate(ctx, "with_schema",
+    tpl, err := postgres.EnsureTemplate(ctx, "with_schema",
         postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose))
+    if err != nil {
+        log.Fatal(err)
+    }
 
     code := m.Run()
 
-    // Cleanup
-    postgres.DropTemplate(ctx, "with_schema")
+    if err := tpl.Release(ctx); err != nil {
+        log.Print(err)
+    }
     os.Exit(code)
 }
 
 func TestUsers(t *testing.T) {
-    // Clone from template - schema already applied
-    db := postgres.New(t, &postgres.PoolInitializer{},
-        testdb.WithTemplate("with_schema"))
-
-    pool := db.Entity().(*pgxpool.Pool)
+    // A clone of the template: schema already applied
+    pool := postgres.Setup(t, testdb.WithTemplate("with_schema"))
     // Start testing immediately
 }
 ```
+
+### Safe to Share Between Packages
+
+`go test ./...` runs every package as its own process, and CI often runs several jobs against one server. `EnsureTemplate` is built for that:
+
+- The first process to arrive builds the template; the others wait for it and reuse it. Setup runs once, no matter how many packages share the name.
+- A template is built under a temporary name and renamed into place, so no process ever sees a half-built one.
+- `Release` drops the template only when the last process using it is done. A process that crashes drops out of the count on its own, because its claim on the template dies with its connection.
+- The template is a real PostgreSQL template (`IS_TEMPLATE true`), so a stray `DROP DATABASE` is refused.
+
+Everything sharing a template must use the same admin database; that is where the coordination happens.
+
+### Keeping Templates Between Runs
+
+By default a template lives for one run. To keep it, give it a fingerprint so it is rebuilt when its inputs change and reused when they don't:
+
+```go
+fp, err := postgres.HashFiles("./migrations", "fixtures/us.sql")
+if err != nil {
+    log.Fatal(err)
+}
+tpl, err := postgres.EnsureTemplate(ctx, "us_region", setup,
+    postgres.WithFingerprint(fp),
+    postgres.WithKeepTemplate())
+```
+
+If the fingerprint changed but another process is still using the old template, `EnsureTemplate` returns an error rather than pulling the template out from under it.
 
 ### Template with SQL Files
 
 Load SQL dumps or fixture data:
 
 ```go
-postgres.CreateTemplate(ctx, "with_fixtures",
+postgres.EnsureTemplate(ctx, "with_fixtures",
     postgres.LoadSQLFile("fixtures/seed_data.sql"))
 ```
 
 ### Template with Custom Setup
 
-Use Go code for programmatic data generation:
+Any `func(ctx context.Context, dsn string) error` can build a template:
 
 ```go
-setupFunc := func(dsn string) error {
-    pool, err := pgxpool.New(context.Background(), dsn)
+setup := func(ctx context.Context, dsn string) error {
+    pool, err := pgxpool.New(ctx, dsn)
     if err != nil {
         return err
     }
     defer pool.Close()
 
-    // Create schema and seed data
-    _, err = pool.Exec(context.Background(), `
+    _, err = pool.Exec(ctx, `
         CREATE TABLE test_data (id SERIAL PRIMARY KEY, value INT);
     `)
     return err
 }
 
-postgres.CreateTemplate(ctx, "custom", setupFunc)
+postgres.EnsureTemplate(ctx, "custom", setup)
 ```
 
 ### Composite Templates
 
-Combine migrations and fixtures:
+Combine migrations and fixtures with `Compose`:
 
 ```go
-setupFunc := func(dsn string) error {
-    // First run migrations
-    if err := postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose)(dsn); err != nil {
-        return err
-    }
-    // Then load fixtures
-    return postgres.LoadSQLFile("fixtures/data.sql")(dsn)
-}
-
-postgres.CreateTemplate(ctx, "full", setupFunc)
+postgres.EnsureTemplate(ctx, "full",
+    postgres.Compose(
+        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose),
+        postgres.LoadSQLFile("fixtures/data.sql"),
+    ))
 ```
 
 ### Multiple Templates
 
-Use different templates for different test scenarios:
+Different templates for different scenarios:
 
 ```go
 func TestMain(m *testing.M) {
     ctx := context.Background()
 
-    postgres.CreateTemplate(ctx, "us_region", postgres.LoadSQLFile("fixtures/us.sql"))
-    postgres.CreateTemplate(ctx, "eu_region", postgres.LoadSQLFile("fixtures/eu.sql"))
+    us, err := postgres.EnsureTemplate(ctx, "us_region", postgres.LoadSQLFile("fixtures/us.sql"))
+    if err != nil {
+        log.Fatal(err)
+    }
+    eu, err := postgres.EnsureTemplate(ctx, "eu_region", postgres.LoadSQLFile("fixtures/eu.sql"))
+    if err != nil {
+        log.Fatal(err)
+    }
 
     code := m.Run()
 
-    postgres.DropTemplate(ctx, "us_region")
-    postgres.DropTemplate(ctx, "eu_region")
+    us.Release(ctx)
+    eu.Release(ctx)
     os.Exit(code)
 }
 
 func TestUSCheckout(t *testing.T) {
-    db := postgres.New(t, &postgres.PoolInitializer{},
-        testdb.WithTemplate("us_region"))
+    pool := postgres.Setup(t, testdb.WithTemplate("us_region"))
     // Test with US data
 }
 
 func TestEUVAT(t *testing.T) {
-    db := postgres.New(t, &postgres.PoolInitializer{},
-        testdb.WithTemplate("eu_region"))
+    pool := postgres.Setup(t, testdb.WithTemplate("eu_region"))
     // Test with EU data
 }
 ```

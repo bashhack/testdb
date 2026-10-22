@@ -4,244 +4,157 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
-	"github.com/bashhack/testdb"
 	"github.com/bashhack/testdb/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const benchSchemaSQL = `
+	CREATE TABLE users (
+		id SERIAL PRIMARY KEY,
+		email TEXT NOT NULL UNIQUE,
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+	CREATE INDEX idx_users_email ON users(email);
+`
+
+// benchFixtureSQL builds a moderately large fixture: a products table with
+// indexes and 1000 rows, simulating regional seed data.
+func benchFixtureSQL() string {
+	var sql strings.Builder
+	sql.WriteString(`
+		CREATE TABLE products (
+			id SERIAL PRIMARY KEY,
+			name TEXT NOT NULL,
+			price DECIMAL(10,2) NOT NULL,
+			category TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW()
+		);
+		CREATE INDEX idx_products_category ON products(category);
+		CREATE INDEX idx_products_price ON products(price);
+	`)
+	for i := range 1000 {
+		sql.WriteString("INSERT INTO products (name, price, category) VALUES ('Product ")
+		sql.WriteString(strconv.Itoa(i))
+		sql.WriteString("', 19.99, 'Category');\n")
+	}
+	return sql.String()
+}
+
+func writeBenchFile(b *testing.B, name, content string) string {
+	b.Helper()
+	path := filepath.Join(b.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		b.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+// ensureBenchTemplate creates a template for a benchmark and releases it
+// when the benchmark ends.
+func ensureBenchTemplate(b *testing.B, name string, setup postgres.SetupFunc) *postgres.Template {
+	b.Helper()
+	ctx := context.Background()
+	tpl, err := postgres.EnsureTemplate(ctx, name, setup)
+	if err != nil {
+		b.Fatalf("EnsureTemplate: %v", err)
+	}
+	b.Cleanup(func() {
+		if err := tpl.Release(ctx); err != nil {
+			b.Errorf("Release: %v", err)
+		}
+	})
+	return tpl
+}
+
 // BenchmarkFreshDatabase measures the time to create a fresh database from scratch
 func BenchmarkFreshDatabase(b *testing.B) {
 	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		db := postgres.New(b, &postgres.PoolInitializer{})
-		_ = db
+	for b.Loop() {
+		postgres.New(b, &postgres.PoolInitializer{})
 		// Cleanup happens automatically via b.Cleanup()
 	}
 }
 
-// BenchmarkTemplateClone measures the time to clone from a template
+// BenchmarkTemplateClone measures the time to clone from an empty template
 func BenchmarkTemplateClone(b *testing.B) {
-	ctx := context.Background()
-	templateName := "bench_template_empty"
+	tpl := ensureBenchTemplate(b, "bench_template_empty", nil)
 
-	// Setup: Create template once before benchmark
-	err := postgres.CreateTemplate(ctx, templateName, nil)
-	if err != nil {
-		b.Fatalf("Failed to create template: %v", err)
-	}
-	defer postgres.DropTemplate(ctx, templateName)
-
-	b.ResetTimer()
 	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		db := postgres.New(b, &postgres.PoolInitializer{},
-			testdb.WithTemplate(templateName))
-		_ = db
-		// Cleanup happens automatically via b.Cleanup()
+	for b.Loop() {
+		postgres.New(b, &postgres.PoolInitializer{}, tpl.Option())
 	}
 }
 
-// BenchmarkFreshDatabaseWithSchema measures creating fresh DB + running migrations
+// BenchmarkFreshDatabaseWithSchema measures creating a fresh DB and applying the schema
 func BenchmarkFreshDatabaseWithSchema(b *testing.B) {
-	// Create a simple migration file
-	tmpDir := b.TempDir()
-	migrationFile := filepath.Join(tmpDir, "001_create_users.sql")
-	migrationSQL := `
-		CREATE TABLE users (
-			id SERIAL PRIMARY KEY,
-			email TEXT NOT NULL UNIQUE,
-			created_at TIMESTAMP DEFAULT NOW()
-		);
-		CREATE INDEX idx_users_email ON users(email);
-	`
-	if err := os.WriteFile(migrationFile, []byte(migrationSQL), 0644); err != nil {
-		b.Fatalf("Failed to write migration: %v", err)
-	}
-
-	b.ResetTimer()
 	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Create fresh DB
+	for b.Loop() {
 		db := postgres.New(b, &postgres.PoolInitializer{})
-
-		// Run "migration" (load SQL file)
 		pool := db.Entity().(*pgxpool.Pool)
-		sqlBytes, _ := os.ReadFile(migrationFile)
-		_, err := pool.Exec(context.Background(), string(sqlBytes))
-		if err != nil {
+		if _, err := pool.Exec(context.Background(), benchSchemaSQL); err != nil {
 			b.Fatalf("Failed to run migration: %v", err)
 		}
 	}
 }
 
-// BenchmarkTemplateCloneWithSchema measures cloning from template that has schema
+// BenchmarkTemplateCloneWithSchema measures cloning from a template that has the schema
 func BenchmarkTemplateCloneWithSchema(b *testing.B) {
-	ctx := context.Background()
-	templateName := "bench_template_with_schema"
+	schemaFile := writeBenchFile(b, "schema.sql", benchSchemaSQL)
+	tpl := ensureBenchTemplate(b, "bench_template_with_schema", postgres.LoadSQLFile(schemaFile))
 
-	// Setup: Create template with schema
-	tmpDir := b.TempDir()
-	schemaFile := filepath.Join(tmpDir, "schema.sql")
-	schemaSQL := `
-		CREATE TABLE users (
-			id SERIAL PRIMARY KEY,
-			email TEXT NOT NULL UNIQUE,
-			created_at TIMESTAMP DEFAULT NOW()
-		);
-		CREATE INDEX idx_users_email ON users(email);
-	`
-	if err := os.WriteFile(schemaFile, []byte(schemaSQL), 0644); err != nil {
-		b.Fatalf("Failed to write schema: %v", err)
-	}
-
-	err := postgres.CreateTemplate(ctx, templateName,
-		postgres.LoadSQLFile(schemaFile))
-	if err != nil {
-		b.Fatalf("Failed to create template: %v", err)
-	}
-	defer postgres.DropTemplate(ctx, templateName)
-
-	b.ResetTimer()
 	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		db := postgres.New(b, &postgres.PoolInitializer{},
-			testdb.WithTemplate(templateName))
-		_ = db
-		// Schema already present - no migration needed!
+	for b.Loop() {
+		postgres.New(b, &postgres.PoolInitializer{}, tpl.Option())
+		// Schema already present - no migration needed
 	}
 }
 
-// BenchmarkFreshDatabaseWithLargeFixtures simulates loading large SQL dumps
+// BenchmarkFreshDatabaseWithLargeFixtures measures loading the fixture into every fresh DB
 func BenchmarkFreshDatabaseWithLargeFixtures(b *testing.B) {
-	// Create a "large" fixture file (simulating regional data)
-	tmpDir := b.TempDir()
-	fixtureFile := filepath.Join(tmpDir, "fixtures.sql")
+	fixtureSQL := benchFixtureSQL()
 
-	// Generate a moderately complex fixture
-	var fixtureSQL string
-	fixtureSQL += `
-		CREATE TABLE products (
-			id SERIAL PRIMARY KEY,
-			name TEXT NOT NULL,
-			price DECIMAL(10,2) NOT NULL,
-			category TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT NOW()
-		);
-		CREATE INDEX idx_products_category ON products(category);
-		CREATE INDEX idx_products_price ON products(price);
-	`
-	// Insert 1000 rows to simulate fixture data
-	for i := 0; i < 1000; i++ {
-		fixtureSQL += "INSERT INTO products (name, price, category) VALUES ('Product " +
-			string(rune(i)) + "', 19.99, 'Category');\n"
-	}
-
-	if err := os.WriteFile(fixtureFile, []byte(fixtureSQL), 0644); err != nil {
-		b.Fatalf("Failed to write fixture: %v", err)
-	}
-
-	b.ResetTimer()
 	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		db := postgres.New(b, &postgres.PoolInitializer{})
 		pool := db.Entity().(*pgxpool.Pool)
-
-		// Load fixtures
-		sqlBytes, _ := os.ReadFile(fixtureFile)
-		_, err := pool.Exec(context.Background(), string(sqlBytes))
-		if err != nil {
+		if _, err := pool.Exec(context.Background(), fixtureSQL); err != nil {
 			b.Fatalf("Failed to load fixtures: %v", err)
 		}
 	}
 }
 
-// BenchmarkTemplateCloneWithLargeFixtures measures cloning template with fixtures
+// BenchmarkTemplateCloneWithLargeFixtures measures cloning from a template with the fixture
 func BenchmarkTemplateCloneWithLargeFixtures(b *testing.B) {
-	ctx := context.Background()
-	templateName := "bench_template_with_fixtures"
+	fixtureFile := writeBenchFile(b, "fixtures.sql", benchFixtureSQL())
+	tpl := ensureBenchTemplate(b, "bench_template_with_fixtures", postgres.LoadSQLFile(fixtureFile))
 
-	// Setup: Create template with fixtures
-	tmpDir := b.TempDir()
-	fixtureFile := filepath.Join(tmpDir, "fixtures.sql")
-
-	var fixtureSQL string
-	fixtureSQL += `
-		CREATE TABLE products (
-			id SERIAL PRIMARY KEY,
-			name TEXT NOT NULL,
-			price DECIMAL(10,2) NOT NULL,
-			category TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT NOW()
-		);
-		CREATE INDEX idx_products_category ON products(category);
-		CREATE INDEX idx_products_price ON products(price);
-	`
-	for i := 0; i < 1000; i++ {
-		fixtureSQL += "INSERT INTO products (name, price, category) VALUES ('Product " +
-			string(rune(i)) + "', 19.99, 'Category');\n"
-	}
-
-	if err := os.WriteFile(fixtureFile, []byte(fixtureSQL), 0644); err != nil {
-		b.Fatalf("Failed to write fixture: %v", err)
-	}
-
-	err := postgres.CreateTemplate(ctx, templateName,
-		postgres.LoadSQLFile(fixtureFile))
-	if err != nil {
-		b.Fatalf("Failed to create template: %v", err)
-	}
-	defer postgres.DropTemplate(ctx, templateName)
-
-	b.ResetTimer()
 	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		db := postgres.New(b, &postgres.PoolInitializer{},
-			testdb.WithTemplate(templateName))
-		_ = db
-		// Fixtures already present - instant!
+	for b.Loop() {
+		postgres.New(b, &postgres.PoolInitializer{}, tpl.Option())
+		// Fixtures already present
 	}
 }
 
-// BenchmarkTemplateCreation measures one-time cost of creating a template
+// BenchmarkTemplateCreation measures the one-time cost of building and dropping a template
 func BenchmarkTemplateCreation(b *testing.B) {
 	ctx := context.Background()
+	schemaFile := writeBenchFile(b, "schema.sql", benchSchemaSQL)
+	setup := postgres.LoadSQLFile(schemaFile)
 
-	// Create schema for template
-	tmpDir := b.TempDir()
-	schemaFile := filepath.Join(tmpDir, "schema.sql")
-	schemaSQL := `
-		CREATE TABLE users (
-			id SERIAL PRIMARY KEY,
-			email TEXT NOT NULL UNIQUE,
-			created_at TIMESTAMP DEFAULT NOW()
-		);
-		CREATE INDEX idx_users_email ON users(email);
-	`
-	if err := os.WriteFile(schemaFile, []byte(schemaSQL), 0644); err != nil {
-		b.Fatalf("Failed to write schema: %v", err)
-	}
-
-	b.ResetTimer()
 	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		templateName := "bench_template_creation_" + string(rune(i))
-
-		err := postgres.CreateTemplate(ctx, templateName,
-			postgres.LoadSQLFile(schemaFile))
+	i := 0
+	for b.Loop() {
+		tpl, err := postgres.EnsureTemplate(ctx, "bench_template_creation_"+strconv.Itoa(i), setup)
 		if err != nil {
-			b.Fatalf("Failed to create template: %v", err)
+			b.Fatalf("EnsureTemplate: %v", err)
 		}
-
-		// Cleanup
-		postgres.DropTemplate(ctx, templateName)
+		if err := tpl.Release(ctx); err != nil {
+			b.Fatalf("Release: %v", err)
+		}
+		i++
 	}
 }

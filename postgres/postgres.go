@@ -181,8 +181,8 @@ func (p *PostgresProvider) CreateDatabase(ctx context.Context, name string) erro
 // PostgreSQL's template cloning works at the filesystem level, making it
 // extremely fast regardless of the database size.
 //
-// The template database must already exist and should have been created
-// with postgres.CreateTemplate() or manually with ALLOW_CONNECTIONS FALSE.
+// The template database must already exist; postgres.EnsureTemplate creates
+// it and keeps it alive while this process uses it.
 func (p *PostgresProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error {
 	quotedName := pgx.Identifier{name}.Sanitize()
 	quotedTemplate := pgx.Identifier{templateName}.Sanitize()
@@ -192,7 +192,7 @@ func (p *PostgresProvider) CreateDatabaseFromTemplate(ctx context.Context, name,
 	if err != nil {
 		// Check if error is due to non-existent template and provide helpful message
 		if strings.Contains(err.Error(), "does not exist") {
-			return fmt.Errorf("template database %q does not exist (create it with postgres.CreateTemplate): %w", templateName, err)
+			return fmt.Errorf("template database %q does not exist (create it with postgres.EnsureTemplate): %w", templateName, err)
 		}
 		return fmt.Errorf("create database from template: %w", err)
 	}

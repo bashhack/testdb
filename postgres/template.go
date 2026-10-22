@@ -2,227 +2,577 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"hash/fnv"
+	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/bashhack/testdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// CreateTemplate creates a reusable template database that can be cloned
-// for fast test database creation.
+// SetupFunc populates a template database. It receives a DSN for the freshly
+// created, empty database and loads whatever the template should contain:
+// schema, fixtures, seed data. See LoadSQLFile, LoadMigrations and Compose
+// for ready-made setup functions.
+type SetupFunc func(ctx context.Context, dsn string) error
+
+// Template is this process's handle on a template database obtained from
+// EnsureTemplate. It keeps one connection to the admin database open for as
+// long as it lives; that connection holds the lock which tells other
+// processes the template is in use. Call Release when the process is done.
+type Template struct {
+	name     string
+	provider *PostgresProvider
+	keep     bool
+	released bool
+}
+
+// Name returns the template database's name, for use with testdb.WithTemplate.
+func (t *Template) Name() string { return t.name }
+
+// Option returns the testdb.Option that makes a test database a clone of
+// this template, so tests can write postgres.Setup(t, tpl.Option()).
+func (t *Template) Option() testdb.Option { return testdb.WithTemplate(t.name) }
+
+// TemplateOption configures EnsureTemplate.
+type TemplateOption func(*templateConfig)
+
+type templateConfig struct {
+	adminDSN    string
+	fingerprint string
+	keep        bool
+}
+
+// WithFingerprint identifies the template's content, typically a hash of the
+// files it is built from (see HashFiles). EnsureTemplate reuses an existing
+// template whose fingerprint matches and rebuilds one whose fingerprint
+// differs, so templates can safely outlive a test run (see WithKeepTemplate).
+// Without a fingerprint an existing template is always reused as it is.
+func WithFingerprint(fingerprint string) TemplateOption {
+	return func(c *templateConfig) {
+		c.fingerprint = fingerprint
+	}
+}
+
+// WithKeepTemplate leaves the template in place when the last process
+// releases it, so the next run can reuse it instead of rebuilding. Pair it
+// with WithFingerprint, otherwise a kept template is never refreshed.
+func WithKeepTemplate() TemplateOption {
+	return func(c *templateConfig) {
+		c.keep = true
+	}
+}
+
+// WithTemplateAdminDSN overrides the admin connection string used to create
+// and manage the template. By default it is discovered the same way as for
+// test databases (TEST_DATABASE_URL, then DATABASE_URL, then the local
+// default). Every process sharing a template must use the same admin
+// database, because that is where the coordinating locks live.
+func WithTemplateAdminDSN(dsn string) TemplateOption {
+	return func(c *templateConfig) {
+		c.adminDSN = dsn
+	}
+}
+
+// EnsureTemplate makes sure the named template database exists and marks it
+// as in use by this process, returning a handle to Release when done.
+// Tests then clone it with testdb.WithTemplate(name).
 //
-// Templates are useful when:
-//   - You have large SQL dumps (fixtures) that are slow to load
-//   - You need multiple fixture sets for different test suites (regional data, scenarios)
-//   - You want to test migrations from specific schema versions
+// It is safe to call from several test packages or CI jobs at once against
+// the same server. The first process to arrive builds the template with
+// setup; the others wait for it and reuse it; the last one to Release drops
+// it. A process that crashes drops out of the count automatically, because
+// its lock dies with its connection. Templates are built under a temporary
+// name and renamed into place, so a half-built template is never visible to
+// another process.
 //
-// The setup function receives a DSN and should initialize the template
-// (load SQL dumps, run migrations, insert seed data, etc.).
-//
-// After creation, the template is marked with ALLOW_CONNECTIONS FALSE
-// to prevent accidental modification and enable safe cloning.
-//
-// Example:
+// The usual place to call it is TestMain:
 //
 //	func TestMain(m *testing.M) {
 //	    ctx := context.Background()
-//
-//	    // Create template with US region fixtures
-//	    postgres.CreateTemplate(ctx, "us_region",
+//	    tpl, err := postgres.EnsureTemplate(ctx, "us_region",
 //	        postgres.LoadSQLFile("fixtures/us_region.sql"))
-//
+//	    if err != nil {
+//	        log.Fatal(err)
+//	    }
 //	    code := m.Run()
-//
-//	    // Cleanup
-//	    postgres.DropTemplate(ctx, "us_region")
+//	    if err := tpl.Release(ctx); err != nil {
+//	        log.Print(err)
+//	    }
 //	    os.Exit(code)
 //	}
-func CreateTemplate(ctx context.Context, name string, setup func(dsn string) error, opts ...testdb.Option) error {
-	provider := &PostgresProvider{}
-
-	cfg := testdb.DefaultConfig()
+//
+// A ctx with a deadline bounds the whole operation, including waiting for
+// another process's build to finish.
+func EnsureTemplate(ctx context.Context, name string, setup SetupFunc, opts ...TemplateOption) (*Template, error) {
+	if err := validateTemplateName(name); err != nil {
+		return nil, fmt.Errorf("postgres.EnsureTemplate: %w", err)
+	}
+	var cfg templateConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	if err := provider.Initialize(ctx, cfg); err != nil {
-		return fmt.Errorf("initialize provider: %w", err)
+	provider := &PostgresProvider{}
+	if err := provider.Initialize(ctx, testdb.Config{AdminDSNOverride: cfg.adminDSN}); err != nil {
+		return nil, fmt.Errorf("postgres.EnsureTemplate %q: %w", name, err)
 	}
-	defer provider.Cleanup(ctx)
-
-	// Create template database
-	if err := provider.CreateDatabase(ctx, name); err != nil {
-		return fmt.Errorf("create template database: %w", err)
-	}
-
-	// Build DSN for setup
-	dsn, err := provider.BuildDSN(name)
+	tpl, err := provider.ensureTemplate(ctx, name, setup, cfg)
 	if err != nil {
-		_ = provider.DropDatabase(ctx, name) // Best effort cleanup
-		return fmt.Errorf("build DSN: %w", err)
+		// Closing the connection also releases any lock still held on it.
+		err = errors.Join(err, provider.Cleanup(context.WithoutCancel(ctx)))
+		return nil, fmt.Errorf("postgres.EnsureTemplate %q: %w", name, err)
 	}
+	return tpl, nil
+}
 
-	// Run setup function (migrations, SQL dumps, seed data, etc.)
-	if setup != nil {
-		if err := setup(dsn); err != nil {
-			_ = provider.DropDatabase(ctx, name) // Best effort cleanup
-			return fmt.Errorf("setup template: %w", err)
+// ensureTemplate does the work of EnsureTemplate under the build lock.
+func (p *PostgresProvider) ensureTemplate(ctx context.Context, name string, setup SetupFunc, cfg templateConfig) (*Template, error) {
+	if err := p.lockBuild(ctx, name); err != nil {
+		return nil, err
+	}
+	tpl, err := p.ensureTemplateLocked(ctx, name, setup, cfg)
+	// Failing to release the build lock would stall every other process
+	// sharing this template, so it is an error even when the rest succeeded;
+	// the caller then closes the connection, which releases the lock.
+	if unlockErr := p.unlockBuild(context.WithoutCancel(ctx), name); unlockErr != nil {
+		return nil, errors.Join(err, unlockErr)
+	}
+	return tpl, err
+}
+
+func (p *PostgresProvider) ensureTemplateLocked(ctx context.Context, name string, setup SetupFunc, cfg templateConfig) (*Template, error) {
+	info, err := p.templateInfo(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !info.exists:
+		if err := p.buildTemplate(ctx, name, setup, cfg.fingerprint); err != nil {
+			return nil, err
+		}
+	case !info.isTemplate:
+		return nil, fmt.Errorf("database %q exists but is not a template; drop it or choose another name", name)
+	case cfg.fingerprint != "" && info.fingerprint != cfg.fingerprint:
+		// Stale content. Rebuild only if no other process is using it.
+		locked, err := p.tryLockUseExclusive(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if !locked {
+			return nil, fmt.Errorf("template %q has a different fingerprint and is in use by another process; let that run finish first", name)
+		}
+		dropErr := p.dropTemplate(ctx, name)
+		unlockErr := p.unlockUseExclusive(context.WithoutCancel(ctx), name)
+		if err := errors.Join(dropErr, unlockErr); err != nil {
+			return nil, fmt.Errorf("replace stale template: %w", err)
+		}
+		if err := p.buildTemplate(ctx, name, setup, cfg.fingerprint); err != nil {
+			return nil, err
 		}
 	}
 
-	// Terminate any lingering connections
-	if err := provider.TerminateConnections(ctx, name); err != nil {
-		return fmt.Errorf("terminate connections: %w", err)
+	if err := p.lockUseShared(ctx, name); err != nil {
+		return nil, err
 	}
+	return &Template{name: name, provider: p, keep: cfg.keep}, nil
+}
 
-	// Mark as template and prevent connections
-	// This makes the database read-only and enables safe cloning
-	quotedName := pgx.Identifier{name}.Sanitize()
-	if _, err := provider.conn.Exec(ctx,
-		fmt.Sprintf("ALTER DATABASE %s ALLOW_CONNECTIONS FALSE", quotedName)); err != nil {
-		return fmt.Errorf("mark as template: %w", err)
+// Release ends this process's use of the template. If no other process is
+// still using it, and WithKeepTemplate was not given, the template is
+// dropped. It is safe to call more than once.
+func (t *Template) Release(ctx context.Context) error {
+	if t.released {
+		return nil
 	}
+	t.released = true
 
+	err := t.provider.release(ctx, t.name, t.keep)
+	// Closing the connection releases whatever locks this process still
+	// holds, which is how the other processes learn it is gone.
+	err = errors.Join(err, t.provider.Cleanup(context.WithoutCancel(ctx)))
+	if err != nil {
+		return fmt.Errorf("postgres: release template %q: %w", t.name, err)
+	}
 	return nil
 }
 
-// DropTemplate drops a template database.
-// This is useful for cleanup in TestMain or when templates need to be rebuilt.
-//
-// Example:
-//
-//	func TestMain(m *testing.M) {
-//	    ctx := context.Background()
-//
-//	    // Create templates
-//	    postgres.CreateTemplate(ctx, "fixtures", setup)
-//
-//	    code := m.Run()
-//
-//	    // Cleanup
-//	    postgres.DropTemplate(ctx, "fixtures")
-//	    os.Exit(code)
-//	}
-func DropTemplate(ctx context.Context, name string, opts ...testdb.Option) error {
-	provider := &PostgresProvider{}
+func (p *PostgresProvider) release(ctx context.Context, name string, keep bool) error {
+	if err := p.unlockUseShared(ctx, name); err != nil {
+		return err
+	}
+	if keep {
+		return nil
+	}
+	return p.dropIfLastOut(ctx, name)
+}
 
-	cfg := testdb.DefaultConfig()
+// dropIfLastOut drops the template if no process is using it any more.
+func (p *PostgresProvider) dropIfLastOut(ctx context.Context, name string) error {
+	if err := p.lockBuild(ctx, name); err != nil {
+		return err
+	}
+	err := p.dropIfLastOutLocked(ctx, name)
+	return errors.Join(err, p.unlockBuild(context.WithoutCancel(ctx), name))
+}
+
+func (p *PostgresProvider) dropIfLastOutLocked(ctx context.Context, name string) error {
+	// The exclusive lock is only granted once every shared holder is gone,
+	// so getting it means no process is using the template.
+	last, err := p.tryLockUseExclusive(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !last {
+		return nil
+	}
+	defer func() { err = errors.Join(err, p.unlockUseExclusive(context.WithoutCancel(ctx), name)) }()
+
+	// Two processes can both get here: one that dropped the template and
+	// closed, and one that had let go of its shared lock and was waiting
+	// for the build lock. The second finds the template already gone.
+	info, err := p.templateInfo(ctx, name)
+	if err != nil || !info.exists {
+		return err
+	}
+	return p.dropTemplate(ctx, name)
+}
+
+// TemplateExists reports whether a database with the given name exists.
+// This is a debugging aid; EnsureTemplate handles existence itself.
+func TemplateExists(ctx context.Context, name string, opts ...TemplateOption) (bool, error) {
+	var cfg templateConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-
-	if err := provider.Initialize(ctx, cfg); err != nil {
-		return fmt.Errorf("initialize provider: %w", err)
+	provider := &PostgresProvider{}
+	if err := provider.Initialize(ctx, testdb.Config{AdminDSNOverride: cfg.adminDSN}); err != nil {
+		return false, fmt.Errorf("postgres.TemplateExists: %w", err)
 	}
-	defer provider.Cleanup(ctx)
+	exists, err := provider.TemplateExists(ctx, name)
+	if err := errors.Join(err, provider.Cleanup(context.WithoutCancel(ctx))); err != nil {
+		return false, fmt.Errorf("postgres.TemplateExists: %w", err)
+	}
+	return exists, nil
+}
 
-	// Re-enable connections so we can drop it
+// buildTemplate creates the template under a temporary name, runs setup,
+// then renames it into place and marks it as a template, so other processes
+// only ever see a complete template or none at all.
+func (p *PostgresProvider) buildTemplate(ctx context.Context, name string, setup SetupFunc, fingerprint string) error {
+	tmp, err := buildName(name)
+	if err != nil {
+		return err
+	}
+	if err := p.CreateDatabase(ctx, tmp); err != nil {
+		return fmt.Errorf("create template database: %w", err)
+	}
+	// discard removes the half-built database after a failure, reporting
+	// its own problems alongside the failure that caused it.
+	discard := func(cause error) error {
+		c := context.WithoutCancel(ctx)
+		return errors.Join(cause, p.TerminateConnections(c, tmp), p.DropDatabase(c, tmp))
+	}
+
+	dsn, err := p.BuildDSN(tmp)
+	if err != nil {
+		return discard(err)
+	}
+	if setup != nil {
+		if err := setup(ctx, dsn); err != nil {
+			return discard(fmt.Errorf("set up template: %w", err))
+		}
+	}
+	// Disallow and terminate connections: both the rename and later clones
+	// need the database free of sessions.
+	if err := p.TerminateConnections(ctx, tmp); err != nil {
+		return discard(err)
+	}
+
+	quotedTmp := pgx.Identifier{tmp}.Sanitize()
 	quotedName := pgx.Identifier{name}.Sanitize()
-	_, _ = provider.conn.Exec(ctx,
-		fmt.Sprintf("ALTER DATABASE %s ALLOW_CONNECTIONS TRUE", quotedName))
-
-	// Terminate connections and drop
-	if err := provider.TerminateConnections(ctx, name); err != nil {
-		return fmt.Errorf("terminate connections: %w", err)
+	err = retryWhileInUse(ctx, func() error {
+		_, err := p.conn.Exec(ctx, fmt.Sprintf("ALTER DATABASE %s RENAME TO %s", quotedTmp, quotedName))
+		return err
+	})
+	if err != nil {
+		return discard(fmt.Errorf("rename template into place: %w", err))
 	}
 
-	if err := provider.DropDatabase(ctx, name); err != nil {
-		return fmt.Errorf("drop template: %w", err)
+	// From here on the database has its final name; on failure drop it by
+	// that name so a broken template is not left behind.
+	if _, err := p.conn.Exec(ctx, fmt.Sprintf("ALTER DATABASE %s IS_TEMPLATE true", quotedName)); err != nil {
+		return errors.Join(fmt.Errorf("mark as template: %w", err),
+			p.DropDatabase(context.WithoutCancel(ctx), name))
 	}
-
+	if fingerprint != "" {
+		literal, err := p.conn.PgConn().EscapeString(fingerprint)
+		if err == nil {
+			_, err = p.conn.Exec(ctx, fmt.Sprintf("COMMENT ON DATABASE %s IS '%s'", quotedName, literal))
+		}
+		if err != nil {
+			return errors.Join(fmt.Errorf("record fingerprint: %w", err),
+				p.dropTemplate(context.WithoutCancel(ctx), name))
+		}
+	}
 	return nil
 }
 
-// TemplateExists checks if a template database exists.
-// This is useful for conditional template creation and debugging.
-//
-// Example:
-//
-//	if !postgres.TemplateExists(ctx, "us_region") {
-//	    postgres.CreateTemplate(ctx, "us_region", setup)
-//	}
-func TemplateExists(ctx context.Context, name string, opts ...testdb.Option) (bool, error) {
-	provider := &PostgresProvider{}
-
-	cfg := testdb.DefaultConfig()
-	for _, opt := range opts {
-		opt(&cfg)
+// dropTemplate drops a template database. Postgres refuses to drop a
+// database while IS_TEMPLATE is set, which is the point of setting it.
+func (p *PostgresProvider) dropTemplate(ctx context.Context, name string) error {
+	quotedName := pgx.Identifier{name}.Sanitize()
+	if _, err := p.conn.Exec(ctx, fmt.Sprintf("ALTER DATABASE %s IS_TEMPLATE false", quotedName)); err != nil {
+		return fmt.Errorf("unmark template: %w", err)
 	}
-
-	if err := provider.Initialize(ctx, cfg); err != nil {
-		return false, fmt.Errorf("initialize provider: %w", err)
-	}
-	defer provider.Cleanup(ctx)
-
-	return provider.TemplateExists(ctx, name)
+	return p.DropDatabase(ctx, name)
 }
 
-// LoadSQLFile returns a setup function that loads a SQL file into the database.
-// This is useful for loading SQL dumps or fixture data.
+type templateInfo struct {
+	exists      bool
+	isTemplate  bool
+	fingerprint string
+}
+
+// templateInfo looks up a database by name along with its template flag and
+// the fingerprint recorded in its comment.
+func (p *PostgresProvider) templateInfo(ctx context.Context, name string) (templateInfo, error) {
+	var info templateInfo
+	err := p.conn.QueryRow(ctx, `
+		SELECT d.datistemplate, COALESCE(s.description, '')
+		FROM pg_database d
+		LEFT JOIN pg_shdescription s ON s.objoid = d.oid AND s.classoid = 'pg_database'::regclass
+		WHERE d.datname = $1`, name).Scan(&info.isTemplate, &info.fingerprint)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return templateInfo{}, nil
+	}
+	if err != nil {
+		return templateInfo{}, fmt.Errorf("look up template: %w", err)
+	}
+	info.exists = true
+	return info, nil
+}
+
+// Advisory locks coordinate processes sharing a template. They are
+// session-level, so a process that dies releases them with its connection.
 //
-// The SQL file is executed directly via pgx connection.
+//   - build: exclusive, held briefly while a template is checked, created
+//     or dropped.
+//   - use: shared by every process using the template for its lifetime;
+//     taken exclusively only to test whether anyone else is still using it.
 //
-// Example:
+// Every lock is taken in the order build then use, so there is no deadlock.
+// Keys are computed here rather than with hashtext() so they can be looked
+// up in pg_locks (see templateLockKey).
+const (
+	lockClassBuild int32 = 0x54534442 // "TSDB"
+	lockClassUse   int32 = 0x54534455 // "TSDU"
+)
+
+// templateLockKey returns the advisory lock key for a template name. It is
+// kept non-negative so it compares directly with pg_locks.objid.
+func templateLockKey(name string) int32 {
+	h := fnv.New32a()
+	h.Write([]byte(name))
+	return int32(h.Sum32() & 0x7fffffff)
+}
+
+func (p *PostgresProvider) lockBuild(ctx context.Context, name string) error {
+	return p.advisoryLock(ctx, "pg_advisory_lock", lockClassBuild, name)
+}
+
+func (p *PostgresProvider) unlockBuild(ctx context.Context, name string) error {
+	return p.advisoryUnlock(ctx, "pg_advisory_unlock", lockClassBuild, name)
+}
+
+func (p *PostgresProvider) lockUseShared(ctx context.Context, name string) error {
+	return p.advisoryLock(ctx, "pg_advisory_lock_shared", lockClassUse, name)
+}
+
+func (p *PostgresProvider) unlockUseShared(ctx context.Context, name string) error {
+	return p.advisoryUnlock(ctx, "pg_advisory_unlock_shared", lockClassUse, name)
+}
+
+func (p *PostgresProvider) tryLockUseExclusive(ctx context.Context, name string) (bool, error) {
+	var locked bool
+	err := p.conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1, $2)", lockClassUse, templateLockKey(name)).Scan(&locked)
+	if err != nil {
+		return false, fmt.Errorf("pg_try_advisory_lock: %w", err)
+	}
+	return locked, nil
+}
+
+func (p *PostgresProvider) unlockUseExclusive(ctx context.Context, name string) error {
+	return p.advisoryUnlock(ctx, "pg_advisory_unlock", lockClassUse, name)
+}
+
+// advisoryLock blocks until the lock is granted. fn is one of the
+// pg_advisory_lock* functions, never user input.
+func (p *PostgresProvider) advisoryLock(ctx context.Context, fn string, class int32, name string) error {
+	if _, err := p.conn.Exec(ctx, "SELECT "+fn+"($1, $2)", class, templateLockKey(name)); err != nil {
+		return fmt.Errorf("%s: %w", fn, err)
+	}
+	return nil
+}
+
+// advisoryUnlock releases a lock this session holds. Postgres reports false
+// when the session did not hold it, which would mean the lock sequence is
+// wrong somewhere, so that is an error too.
+func (p *PostgresProvider) advisoryUnlock(ctx context.Context, fn string, class int32, name string) error {
+	var released bool
+	if err := p.conn.QueryRow(ctx, "SELECT "+fn+"($1, $2)", class, templateLockKey(name)).Scan(&released); err != nil {
+		return fmt.Errorf("%s: %w", fn, err)
+	}
+	if !released {
+		return fmt.Errorf("%s: lock was not held by this session", fn)
+	}
+	return nil
+}
+
+// retryWhileInUse retries an operation that fails with SQLSTATE 55006
+// ("database is being accessed by other users"), which can happen briefly
+// after pg_terminate_backend while the terminated sessions are still
+// winding down.
+func retryWhileInUse(ctx context.Context, op func() error) error {
+	var err error
+	for attempt := range 5 {
+		err = op()
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55006" {
+			return err
+		}
+		select {
+		case <-time.After(time.Duration(10<<(attempt*2)) * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
+// maxTemplateNameLen leaves room for the "_build_xxxxxxxx" suffix within
+// Postgres's 63-byte identifier limit, so a build name is never truncated.
+const maxTemplateNameLen = 63 - len("_build_") - 8
+
+func validateTemplateName(name string) error {
+	if name == "" {
+		return errors.New("template name is empty")
+	}
+	if len(name) > maxTemplateNameLen {
+		return fmt.Errorf("template name %q is %d bytes; the maximum is %d", name, len(name), maxTemplateNameLen)
+	}
+	return nil
+}
+
+func buildName(name string) (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate build name: %w", err)
+	}
+	return name + "_build_" + hex.EncodeToString(b[:]), nil
+}
+
+// HashFiles returns a fingerprint of the given files and directories, from
+// their relative paths and contents. Directories are walked recursively in
+// sorted order, so the result is stable. Use it with WithFingerprint:
 //
-//	postgres.CreateTemplate(ctx, "fixtures",
+//	fp, err := postgres.HashFiles("migrations", "fixtures/us.sql")
+//	...
+//	tpl, err := postgres.EnsureTemplate(ctx, "us_region", setup,
+//	    postgres.WithFingerprint(fp), postgres.WithKeepTemplate())
+func HashFiles(paths ...string) (string, error) {
+	h := sha256.New()
+	for _, root := range paths {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			if rel == "." {
+				rel = filepath.Base(root)
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			// hash.Hash writes never fail, by contract
+			h.Write([]byte(filepath.ToSlash(rel)))
+			h.Write([]byte{0})
+			_, copyErr := io.Copy(h, f)
+			closeErr := f.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			h.Write([]byte{0})
+			return nil
+		})
+		if err != nil {
+			return "", fmt.Errorf("hash %s: %w", root, err)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// LoadSQLFile returns a setup function that runs a SQL file against the
+// template, for SQL dumps and fixture data.
+//
+//	postgres.EnsureTemplate(ctx, "fixtures",
 //	    postgres.LoadSQLFile("fixtures/seed_data.sql"))
-func LoadSQLFile(path string) func(string) error {
-	return func(dsn string) error {
-		// Read SQL file
+func LoadSQLFile(path string) SetupFunc {
+	return func(ctx context.Context, dsn string) error {
 		sqlBytes, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("read SQL file %s: %w", path, err)
 		}
-
-		// Connect to database
-		ctx := context.Background()
 		conn, err := pgx.Connect(ctx, dsn)
 		if err != nil {
 			return fmt.Errorf("connect to database: %w", err)
 		}
-		defer conn.Close(ctx)
-
-		// Execute SQL
-		_, err = conn.Exec(ctx, string(sqlBytes))
-		if err != nil {
-			return fmt.Errorf("execute SQL from %s: %w", path, err)
+		_, execErr := conn.Exec(ctx, string(sqlBytes))
+		closeErr := conn.Close(ctx)
+		if execErr != nil {
+			return fmt.Errorf("execute SQL from %s: %w", path, execErr)
 		}
-
+		if closeErr != nil {
+			return fmt.Errorf("close connection: %w", closeErr)
+		}
 		return nil
 	}
 }
 
-// LoadMigrations returns a setup function that runs database migrations.
-// This is useful for creating templates with your schema already applied,
-// avoiding the need to run migrations for every test.
+// LoadMigrations returns a setup function that runs the migrations in dir
+// with the given tool, so the template carries the schema and tests skip
+// migrating.
 //
 // Supported migration tools:
 //   - testdb.MigrationToolTern (PostgreSQL-only)
 //   - testdb.MigrationToolGoose (multi-database)
 //   - testdb.MigrationToolMigrate (multi-database)
 //
-// Example:
+// For example:
 //
-//	func TestMain(m *testing.M) {
-//	    ctx := context.Background()
-//
-//	    // Create template with migrations - run once
-//	    postgres.CreateTemplate(ctx, "with_schema",
-//	        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose))
-//
-//	    code := m.Run()
-//	    postgres.DropTemplate(ctx, "with_schema")
-//	    os.Exit(code)
-//	}
-//
-//	func TestUsers(t *testing.T) {
-//	    db := postgres.New(t, &postgres.PoolInitializer{},
-//	        testdb.WithTemplate("with_schema"))
-//	    // Schema already applied - fast clone!
-//	}
-func LoadMigrations(dir string, tool testdb.MigrationTool) func(string) error {
-	return func(dsn string) error {
+//	postgres.EnsureTemplate(ctx, "with_schema",
+//	    postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose))
+func LoadMigrations(dir string, tool testdb.MigrationTool) SetupFunc {
+	return func(_ context.Context, dsn string) error {
 		switch tool {
 		case testdb.MigrationToolGoose:
 			return testdb.ExecuteGooseMigrations(dsn, dir, "")
@@ -236,23 +586,21 @@ func LoadMigrations(dir string, tool testdb.MigrationTool) func(string) error {
 	}
 }
 
-// Compose combines multiple setup functions into a single function.
-// Setup functions are executed in order, and if any fails, execution stops.
+// Compose runs several setup functions in order, stopping at the first
+// error. Nil functions are skipped.
 //
-// Example:
-//
-//	postgres.CreateTemplate(ctx, "full",
+//	postgres.EnsureTemplate(ctx, "full",
 //	    postgres.Compose(
 //	        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose),
 //	        postgres.LoadSQLFile("fixtures/seed.sql"),
 //	    ))
-func Compose(setupFuncs ...func(string) error) func(string) error {
-	return func(dsn string) error {
+func Compose(setupFuncs ...SetupFunc) SetupFunc {
+	return func(ctx context.Context, dsn string) error {
 		for _, fn := range setupFuncs {
 			if fn == nil {
 				continue
 			}
-			if err := fn(dsn); err != nil {
+			if err := fn(ctx, dsn); err != nil {
 				return err
 			}
 		}

@@ -56,7 +56,7 @@ type Config struct {
 	// or databases with pre-seeded data.
 	//
 	// If empty (default), a fresh database is created.
-	// If specified, the template database must already exist (see postgres.CreateTemplate).
+	// If specified, the template database must already exist (see postgres.EnsureTemplate).
 	//
 	// Example: "us_region" or "seeded_schema"
 	//
@@ -171,7 +171,7 @@ func WithDBPrefix(prefix string) Option {
 // This is significantly faster than creating a fresh database, especially for large
 // schemas or databases with pre-seeded data.
 //
-// The template database must already exist (created via postgres.CreateTemplate or manually).
+// The template database must already exist (see postgres.EnsureTemplate).
 // If the template doesn't exist, database creation will fail.
 //
 // Performance impact:

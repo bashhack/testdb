@@ -555,14 +555,18 @@ func Example_parallelExecution() {
 func Example_templateWithMigrations() {
 	ctx := context.Background()
 
-	// In TestMain: Create template once with migrations
-	err := postgres.CreateTemplate(ctx, "with_schema",
+	// In TestMain: ensure the template once, with migrations applied
+	tpl, err := postgres.EnsureTemplate(ctx, "with_schema",
 		postgres.LoadMigrations("../testdata/postgres/migrations_goose", testdb.MigrationToolGoose))
 	if err != nil {
 		fmt.Printf("Error creating template: %v\n", err)
 		return
 	}
-	defer postgres.DropTemplate(ctx, "with_schema")
+	defer func() {
+		if err := tpl.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
 
 	// In your test: Clone from template (fast!)
 	t := &testing.T{}
@@ -597,23 +601,27 @@ func Example_templateWithMigrations() {
 func Example_templateComposite() {
 	ctx := context.Background()
 
-	// In TestMain: Create template with both migrations and fixtures
-	setupFunc := func(dsn string) error {
+	// In TestMain: ensure a template with both migrations and fixtures
+	setupFunc := func(ctx context.Context, dsn string) error {
 		// First run migrations to create schema
-		if err := postgres.LoadMigrations("../testdata/postgres/migrations_goose", testdb.MigrationToolGoose)(dsn); err != nil {
+		if err := postgres.LoadMigrations("../testdata/postgres/migrations_goose", testdb.MigrationToolGoose)(ctx, dsn); err != nil {
 			return err
 		}
 		// Then load fixture data
-		// return postgres.LoadSQLFile("fixtures/products.sql")(dsn)
+		// return postgres.LoadSQLFile("fixtures/products.sql")(ctx, dsn)
 		return nil
 	}
 
-	err := postgres.CreateTemplate(ctx, "ecommerce_full", setupFunc)
+	tpl, err := postgres.EnsureTemplate(ctx, "ecommerce_full", setupFunc)
 	if err != nil {
 		fmt.Printf("Error creating template: %v\n", err)
 		return
 	}
-	defer postgres.DropTemplate(ctx, "ecommerce_full")
+	defer func() {
+		if err := tpl.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
 
 	// In your test: Get fully populated database instantly
 	t := &testing.T{}
@@ -648,11 +656,27 @@ func Example_templateComposite() {
 func Example_multipleTemplates() {
 	ctx := context.Background()
 
-	// In TestMain: Create multiple templates for different scenarios
-	postgres.CreateTemplate(ctx, "us_region", nil)
-	postgres.CreateTemplate(ctx, "eu_region", nil)
-	defer postgres.DropTemplate(ctx, "us_region")
-	defer postgres.DropTemplate(ctx, "eu_region")
+	// In TestMain: ensure one template per scenario
+	us, err := postgres.EnsureTemplate(ctx, "us_region", nil)
+	if err != nil {
+		fmt.Printf("Error creating template: %v\n", err)
+		return
+	}
+	defer func() {
+		if err := us.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
+	eu, err := postgres.EnsureTemplate(ctx, "eu_region", nil)
+	if err != nil {
+		fmt.Printf("Error creating template: %v\n", err)
+		return
+	}
+	defer func() {
+		if err := eu.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
 
 	t := &testing.T{}
 
@@ -668,8 +692,14 @@ func Example_multipleTemplates() {
 
 	// Each test has isolated regional data
 	var usDB, euDB string
-	poolUS.QueryRow(context.Background(), "SELECT current_database()").Scan(&usDB)
-	poolEU.QueryRow(context.Background(), "SELECT current_database()").Scan(&euDB)
+	if err := poolUS.QueryRow(ctx, "SELECT current_database()").Scan(&usDB); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	if err := poolEU.QueryRow(ctx, "SELECT current_database()").Scan(&euDB); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 
 	if usDB != euDB {
 		fmt.Println("Each template has isolated database")
@@ -684,16 +714,16 @@ func Example_multipleTemplates() {
 func Example_templateCustomSetup() {
 	ctx := context.Background()
 
-	// In TestMain: Create template with custom Go setup logic
-	setupFunc := func(dsn string) error {
-		pool, err := pgxpool.New(context.Background(), dsn)
+	// In TestMain: ensure a template with custom Go setup logic
+	setupFunc := func(ctx context.Context, dsn string) error {
+		pool, err := pgxpool.New(ctx, dsn)
 		if err != nil {
 			return err
 		}
 		defer pool.Close()
 
 		// Create schema
-		_, err = pool.Exec(context.Background(), `
+		_, err = pool.Exec(ctx, `
 			CREATE TABLE test_data (
 				id SERIAL PRIMARY KEY,
 				value INTEGER NOT NULL
@@ -704,8 +734,8 @@ func Example_templateCustomSetup() {
 		}
 
 		// Programmatically generate dataset
-		for i := 0; i < 100; i++ {
-			_, err = pool.Exec(context.Background(),
+		for i := range 100 {
+			_, err = pool.Exec(ctx,
 				"INSERT INTO test_data (value) VALUES ($1)", i)
 			if err != nil {
 				return err
@@ -715,12 +745,16 @@ func Example_templateCustomSetup() {
 		return nil
 	}
 
-	err := postgres.CreateTemplate(ctx, "large_dataset", setupFunc)
+	tpl, err := postgres.EnsureTemplate(ctx, "large_dataset", setupFunc)
 	if err != nil {
 		fmt.Printf("Error creating template: %v\n", err)
 		return
 	}
-	defer postgres.DropTemplate(ctx, "large_dataset")
+	defer func() {
+		if err := tpl.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
 
 	// In your test: Dataset already generated
 	t := &testing.T{}

@@ -1323,7 +1323,11 @@ func TestDropDatabase_RetryOn55006(t *testing.T) {
 	if err := provider.Initialize(ctx, cfg); err != nil {
 		t.Skipf("PostgreSQL not available: %v", err)
 	}
-	defer provider.Cleanup(ctx)
+	t.Cleanup(func() {
+		if err := provider.Cleanup(ctx); err != nil {
+			t.Errorf("provider cleanup failed: %v", err)
+		}
+	})
 
 	// Create a test database
 	dbName := "test_retry_coverage_" + time.Now().Format("20060102150405")
@@ -1371,7 +1375,11 @@ func TestDropDatabase_RetryOn55006(t *testing.T) {
 	// Wait for the goroutine to finish with the connection before closing it,
 	// otherwise Close races with the interrupted query's Scan
 	<-done
-	conn.Close(ctx)
+	// Its backend was terminated above, so a close error here is expected
+	// and only worth noting
+	if err := conn.Close(ctx); err != nil {
+		t.Logf("closing terminated connection: %v", err)
+	}
 
 	// If retry logic activated, we'd expect it to take at least 10ms (first retry)
 	// But we can't assert this reliably as the timing race might not trigger every time
@@ -1381,7 +1389,9 @@ func TestDropDatabase_RetryOn55006(t *testing.T) {
 	// This should fail with "database does not exist"
 	testConn, err := pgx.Connect(ctx, dsn)
 	if err == nil {
-		testConn.Close(ctx)
+		if closeErr := testConn.Close(ctx); closeErr != nil {
+			t.Logf("closing connection to undropped database: %v", closeErr)
+		}
 		t.Fatal("Database still exists after DropDatabase - retry logic may have failed")
 	}
 
