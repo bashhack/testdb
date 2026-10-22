@@ -3,7 +3,7 @@ module github.com/bashhack/testdb/migrate/golangmigrate
 go 1.26.0
 
 require (
-	github.com/bashhack/testdb v0.0.0
+	github.com/bashhack/testdb v0.1.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/jackc/pgx/v5 v5.11.0
@@ -18,5 +18,3 @@ require (
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 )
-
-replace github.com/bashhack/testdb => ../..
