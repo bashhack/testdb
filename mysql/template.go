@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"runtime"
 	"strconv"
 	"sync"
@@ -37,6 +38,7 @@ type Template struct {
 	connID      uint64
 	serverStart int64
 	keep        bool
+	readyPrefix string
 	pool        *readyPool
 
 	mu       sync.Mutex
@@ -50,15 +52,25 @@ func (t *Template) Name() string { return t.name }
 // this template, so tests can write mysql.Setup(t, tpl.Option()).
 func (t *Template) Option() testdb.Option { return testdb.WithTemplate(t.name) }
 
+// Ready reports how many prepared clones are waiting to be taken right now
+// (see WithReadyDatabases); 0 when the pool is disabled or has run dry.
+func (t *Template) Ready() int {
+	if t.pool == nil {
+		return 0
+	}
+	return len(t.pool.ready)
+}
+
 // TemplateOption configures EnsureTemplate.
 type TemplateOption func(*templateConfig)
 
 type templateConfig struct {
-	adminDSN    string
-	fingerprint string
-	keep        bool
-	ready       int
-	readyPrefix string
+	adminDSN     string
+	fingerprint  string
+	keep         bool
+	ready        int
+	readyWorkers int
+	readyPrefix  string
 }
 
 // WithFingerprint identifies the template's content, typically a hash of the
@@ -89,9 +101,20 @@ func WithTemplateAdminDSN(dsn string) TemplateOption {
 // milliseconds for a real schema (every table is created again); taking a
 // prepared one costs nothing, and the pool refills while tests run. The
 // default is runtime.GOMAXPROCS(0), which is also go test's default
-// -parallel. 0 disables the pool: every test clones synchronously.
+// -parallel. 0 disables the pool: every test clones on demand.
+//
+// The pool keeps up as long as tests take clones no faster than the
+// workers (see WithReadyWorkers) can make them. When it runs dry, a test
+// clones on demand rather than wait.
 func WithReadyDatabases(n int) TemplateOption {
 	return func(c *templateConfig) { c.ready = n }
+}
+
+// WithReadyWorkers sets how many clones are made in parallel to keep the
+// pool full. The server handles concurrent clones well, so the default is
+// the pool size.
+func WithReadyWorkers(n int) TemplateOption {
+	return func(c *templateConfig) { c.readyWorkers = n }
 }
 
 // WithReadyPrefix sets the name prefix of prepared databases (default
@@ -135,22 +158,25 @@ func EnsureTemplate(ctx context.Context, name string, setup SetupFunc, opts ...T
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.readyWorkers <= 0 {
+		cfg.readyWorkers = cfg.ready
+	}
 
 	p := &Provider{}
 	if err := p.Initialize(ctx, testdb.Config{AdminDSNOverride: cfg.adminDSN}); err != nil {
 		return nil, fmt.Errorf("mysql.EnsureTemplate %q: %w", name, err)
 	}
-	tpl := &Template{name: name, provider: p, keep: cfg.keep}
+	tpl := &Template{name: name, provider: p, keep: cfg.keep, readyPrefix: cfg.readyPrefix}
 	if err := tpl.ensure(ctx, setup, cfg); err != nil {
 		err = errors.Join(err, p.Cleanup(context.WithoutCancel(ctx)))
 		return nil, fmt.Errorf("mysql.EnsureTemplate %q: %w", name, err)
 	}
 	registry.Store(name, tpl)
 	if cfg.ready > 0 {
-		pool, err := startReadyPool(tpl, cfg.ready, cfg.readyPrefix)
+		pool, err := startReadyPool(tpl, cfg.ready, cfg.readyWorkers)
 		if err != nil {
-			// The pool is an optimisation; without it tests clone synchronously
-			tpl.pool = nil
+			// The pool is an optimisation; without it tests clone on demand
+			log.Printf("testdb: template %q: cannot prepare databases ahead, tests will clone on demand: %v", name, err)
 			return tpl, nil
 		}
 		tpl.pool = pool

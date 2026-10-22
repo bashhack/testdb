@@ -60,10 +60,13 @@ func cloneDatabase(ctx context.Context, adminDSN, source, target string) (err er
 		quoteIdentifier(target), charset, collation)); err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
-	// From here, a failure must not leave a half-copied database behind
+	// From here, a failure must not leave a half-copied database behind.
+	// The drop goes through db, not conn: if the failure was a cancelled
+	// statement, database/sql has discarded conn, and db hands out a
+	// working connection instead.
 	defer func() {
 		if err != nil {
-			_, dropErr := conn.ExecContext(context.WithoutCancel(ctx), "DROP DATABASE IF EXISTS "+quoteIdentifier(target))
+			_, dropErr := db.ExecContext(context.WithoutCancel(ctx), "DROP DATABASE IF EXISTS "+quoteIdentifier(target))
 			err = errors.Join(err, dropErr)
 		}
 	}()
@@ -96,15 +99,14 @@ func cloneDatabase(ctx context.Context, adminDSN, source, target string) (err er
 		}
 	}
 
+	// Generated columns cannot be inserted into; the clone recomputes them.
+	// One query for every table's columns rather than one per table.
+	columnsByTable, err := insertableColumns(ctx, conn, source)
+	if err != nil {
+		return err
+	}
 	for _, table := range tables {
-		// Generated columns cannot be inserted into; the clone recomputes them
-		columns, err := listNames(ctx, conn, `
-			SELECT COLUMN_NAME FROM information_schema.COLUMNS
-			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND EXTRA NOT LIKE '%GENERATED%'
-			ORDER BY ORDINAL_POSITION`, source, table)
-		if err != nil {
-			return fmt.Errorf("list columns of %s: %w", table, err)
-		}
+		columns := columnsByTable[table]
 		if len(columns) == 0 {
 			continue
 		}
@@ -281,6 +283,30 @@ func showCreateRow(ctx context.Context, conn *sql.Conn, show string) (map[string
 		result[c] = values[i].String
 	}
 	return result, rows.Err()
+}
+
+// insertableColumns returns, per table, the columns rows can be inserted
+// into (everything but generated columns), in table order.
+func insertableColumns(ctx context.Context, conn *sql.Conn, schema string) (map[string][]string, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = ? AND EXTRA NOT LIKE '%GENERATED%'
+		ORDER BY TABLE_NAME, ORDINAL_POSITION`, schema)
+	if err != nil {
+		return nil, fmt.Errorf("list columns: %w", err)
+	}
+	byTable := map[string][]string{}
+	for rows.Next() {
+		var table, column string
+		if err := rows.Scan(&table, &column); err != nil {
+			return nil, errors.Join(fmt.Errorf("list columns: %w", err), rows.Close())
+		}
+		byTable[table] = append(byTable[table], column)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, fmt.Errorf("list columns: %w", err)
+	}
+	return byTable, nil
 }
 
 // listNames runs a query whose rows each hold one name.
