@@ -61,6 +61,7 @@ POSTGRES_DB := testdb
 MYSQL_SERVICE := test-mysql
 MYSQL_USER := root
 MYSQL_PASSWORD := root
+MARIADB_SERVICE := test-mariadb
 
 .PHONY: check_pgcli
 check_pgcli:
@@ -103,6 +104,23 @@ define wait_for_mysql
 	echo "✅ MySQL is ready!"
 endef
 
+# The MariaDB image ships the mariadb client, not mysql.
+define wait_for_mariadb
+	@echo "Waiting for MariaDB to be ready..."
+	@attempts=0; \
+	while ! docker compose -f $(1) exec -T $(2) mariadb -u$(3) -p$(4) -e 'SELECT 1' >/dev/null 2>&1; do \
+		attempts=$$((attempts+1)); \
+		if [ $$attempts -gt 60 ]; then \
+			echo "❌ MariaDB failed to become ready after 60 seconds"; \
+			echo "Try 'make $(5)' for a fresh start"; \
+			exit 1; \
+		fi; \
+		echo "⏳ Waiting... ($$attempts/60)"; \
+		sleep 1; \
+	done; \
+	echo "✅ MariaDB is ready (port 3307; set TEST_MYSQL_URL to use it)"
+endef
+
 ## test/db/start: Start PostgreSQL test database
 .PHONY: test/db/start
 test/db/start:
@@ -110,6 +128,7 @@ test/db/start:
 	docker compose -f $(POSTGRES_COMPOSE_FILE) up -d
 	$(call wait_for_postgres,$(POSTGRES_COMPOSE_FILE),$(POSTGRES_SERVICE),$(POSTGRES_USER),$(POSTGRES_DB),test/db/restart)
 	$(call wait_for_mysql,$(POSTGRES_COMPOSE_FILE),$(MYSQL_SERVICE),$(MYSQL_USER),$(MYSQL_PASSWORD),test/db/restart)
+	$(call wait_for_mariadb,$(POSTGRES_COMPOSE_FILE),$(MARIADB_SERVICE),$(MYSQL_USER),$(MYSQL_PASSWORD),test/db/restart)
 
 ## test/db/stop: Stop PostgreSQL test database
 .PHONY: test/db/stop
@@ -141,6 +160,7 @@ test/db/restart: test/db/clean
 	docker compose -f $(POSTGRES_COMPOSE_FILE) up -d
 	$(call wait_for_postgres,$(POSTGRES_COMPOSE_FILE),$(POSTGRES_SERVICE),$(POSTGRES_USER),$(POSTGRES_DB),test/db/restart)
 	$(call wait_for_mysql,$(POSTGRES_COMPOSE_FILE),$(MYSQL_SERVICE),$(MYSQL_USER),$(MYSQL_PASSWORD),test/db/restart)
+	$(call wait_for_mariadb,$(POSTGRES_COMPOSE_FILE),$(MARIADB_SERVICE),$(MYSQL_USER),$(MYSQL_PASSWORD),test/db/restart)
 
 ## test/db/psql: Connect to Postgres database
 .PHONY: test/db/psql

@@ -43,3 +43,22 @@ services:
       - "--skip-log-bin"
       - "--innodb-doublewrite=0"
       - "--innodb-flush-method=O_DIRECT_NO_FSYNC"
+
+  # MariaDB on 3307: point TEST_MYSQL_URL at it to run the MySQL suite
+  # against MariaDB, as CI does.
+  test-mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    command:
+      - "--innodb-flush-log-at-trx-commit=0"
+      - "--skip-log-bin"
+      - "--innodb-doublewrite=0"
+      - "--innodb-flush-method=O_DIRECT_NO_FSYNC"
