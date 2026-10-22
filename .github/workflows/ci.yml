@@ -19,7 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        go-version: ['1.27']
+        # The oldest Go version testdb supports, and the current one
+        go-version: ['1.26', '1.27']
 
     services:
       postgres:

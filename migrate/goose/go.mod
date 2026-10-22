@@ -1,6 +1,6 @@
 module github.com/bashhack/testdb/migrate/goose
 
-go 1.27.0
+go 1.26.0
 
 require (
 	github.com/bashhack/testdb v0.0.0
