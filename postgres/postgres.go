@@ -108,8 +108,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PostgresProvider implements testdb.Provider for PostgreSQL.
-// It handles database creation, deletion, and connection management.
+const (
+	// AdminDSNEnv is the environment variable this provider checks first for
+	// its admin connection string, before the shared TEST_DATABASE_URL and
+	// DATABASE_URL. Set it when a project tests against more than one
+	// database server.
+	AdminDSNEnv = "TEST_POSTGRES_URL"
+
+	// DefaultAdminDSN is used when no override or environment variable is set.
+	DefaultAdminDSN = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+)
+
+// PostgresProvider implements testdb.Provider and testdb.TemplateProvider
+// for PostgreSQL. It handles database creation, deletion, template cloning
+// and connection management.
 type PostgresProvider struct {
 	conn        *pgx.Conn
 	adminDSN    string          // Store the admin DSN for use in migrations
@@ -130,8 +142,7 @@ type PoolInitializer struct {
 // It establishes a connection to the admin database which will be used
 // for creating and managing test databases.
 func (p *PostgresProvider) Initialize(ctx context.Context, cfg testdb.Config) error {
-	const defaultPostgresDSN = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
-	adminDSN := testdb.ResolveAdminDSN(cfg, defaultPostgresDSN)
+	adminDSN := testdb.ResolveAdminDSN(cfg, DefaultAdminDSN, AdminDSNEnv)
 
 	// Store the admin DSN for later use (e.g., migrations)
 	p.adminDSN = adminDSN

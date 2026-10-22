@@ -48,6 +48,7 @@ package testdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -114,21 +115,8 @@ type Provider interface {
 	// CreateDatabase creates a new database with the given name.
 	CreateDatabase(ctx context.Context, name string) error
 
-	// CreateDatabaseFromTemplate creates a new database by cloning a template.
-	// This is significantly faster than CreateDatabase for databases with large schemas
-	// or pre-seeded data. The template database must already exist.
-	//
-	// Providers that don't support templates should return an error.
-	CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error
-
 	// DropDatabase drops an existing database.
 	DropDatabase(ctx context.Context, name string) error
-
-	// TemplateExists checks if a template database exists.
-	// This is useful for debugging and conditional template creation.
-	//
-	// Providers that don't support templates should return false, nil.
-	TemplateExists(ctx context.Context, name string) (bool, error)
 
 	// TerminateConnections forcefully closes all connections to a database.
 	// This is necessary before dropping a database.
@@ -144,6 +132,24 @@ type Provider interface {
 
 	// Cleanup performs any necessary provider cleanup (e.g., closing admin connections).
 	Cleanup(ctx context.Context) error
+}
+
+// TemplateProvider is implemented by providers whose database can clone one
+// database from another, which is what templates (see WithTemplate) rely on.
+// PostgreSQL has CREATE DATABASE ... TEMPLATE and implements it. A provider
+// for a database without an equivalent implements only Provider, and New
+// returns ErrTemplatesNotSupported if a template is requested with it.
+type TemplateProvider interface {
+	Provider
+
+	// CreateDatabaseFromTemplate creates a new database by cloning a template.
+	// This is significantly faster than CreateDatabase for databases with large schemas
+	// or pre-seeded data. The template database must already exist.
+	CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error
+
+	// TemplateExists checks if a template database exists.
+	// This is useful for debugging and conditional template creation.
+	TemplateExists(ctx context.Context, name string) (bool, error)
 }
 
 // DBInitializer defines the interface for custom database initialization in tests.
@@ -300,6 +306,17 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 		}
 	}
 
+	// Decide this before touching the server: a template on a provider that
+	// cannot clone is a configuration error, not a connection problem.
+	if cfg.TemplateName != "" {
+		if _, ok := provider.(TemplateProvider); !ok {
+			return nil, &Error{
+				Op:  "testdb.New",
+				Err: fmt.Errorf("%w by %T", ErrTemplatesNotSupported, provider),
+			}
+		}
+	}
+
 	ctx := ContextOf(t)
 	// t.Context() is already cancelled by the time t.Cleanup functions run,
 	// so cleanup must not use it.
@@ -329,7 +346,8 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 
 	// Use template if specified, otherwise create fresh database
 	if cfg.TemplateName != "" {
-		if err := provider.CreateDatabaseFromTemplate(ctx, dbName, cfg.TemplateName); err != nil {
+		// Checked above
+		if err := provider.(TemplateProvider).CreateDatabaseFromTemplate(ctx, dbName, cfg.TemplateName); err != nil {
 			return nil, &Error{
 				Op:  "provider.CreateDatabaseFromTemplate",
 				Err: err,

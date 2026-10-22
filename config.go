@@ -19,9 +19,10 @@ type Config struct {
 	// For PostgreSQL, this is typically the 'postgres' database.
 	//
 	// If not specified, the library automatically discovers the admin DSN from:
-	//   1. TEST_DATABASE_URL environment variable
-	//   2. DATABASE_URL environment variable
-	//   3. Database-specific defaults (e.g., postgres://postgres:postgres@localhost:5432/postgres)
+	//   1. A database-specific environment variable (e.g., TEST_POSTGRES_URL)
+	//   2. TEST_DATABASE_URL environment variable
+	//   3. DATABASE_URL environment variable
+	//   4. Database-specific defaults (e.g., postgres://postgres:postgres@localhost:5432/postgres)
 	//
 	// Most users don't need to set this - automatic discovery works in most cases.
 	// Use this when you need custom admin credentials or connection settings.
@@ -242,16 +243,26 @@ func discoverAdminDSN() string {
 //
 // Resolution order:
 //  1. cfg.AdminDSNOverride (explicit user override via WithAdminDSN)
-//  2. TEST_DATABASE_URL environment variable
-//  3. DATABASE_URL environment variable
-//  4. defaultDSN (database-specific default)
+//  2. The provider's own environment variables, in the order given
+//     (e.g. TEST_POSTGRES_URL), so a project that tests against two
+//     databases can point each provider at its own server
+//  3. TEST_DATABASE_URL environment variable
+//  4. DATABASE_URL environment variable
+//  5. defaultDSN (database-specific default)
 //
 // Example usage in provider initialization:
 //
-//	adminDSN := testdb.ResolveAdminDSN(cfg, "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable")
-func ResolveAdminDSN(cfg Config, defaultDSN string) string {
+//	adminDSN := testdb.ResolveAdminDSN(cfg,
+//	    "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable",
+//	    "TEST_POSTGRES_URL")
+func ResolveAdminDSN(cfg Config, defaultDSN string, providerEnv ...string) string {
 	if cfg.AdminDSNOverride != "" {
 		return cfg.AdminDSNOverride
+	}
+	for _, name := range providerEnv {
+		if dsn := os.Getenv(name); dsn != "" {
+			return dsn
+		}
 	}
 	if discovered := discoverAdminDSN(); discovered != "" {
 		return discovered
@@ -305,6 +316,10 @@ var (
 
 	// ErrNoMigrator is returned when RunMigrations is called without a Migrator configured.
 	ErrNoMigrator = errors.New("no migrator configured")
+
+	// ErrTemplatesNotSupported is returned by New when WithTemplate is used
+	// with a provider that does not implement TemplateProvider.
+	ErrTemplatesNotSupported = errors.New("templates are not supported")
 
 	// ErrPrefixTooLong is returned when the database prefix would cause identifier truncation.
 	ErrPrefixTooLong = errors.New("database prefix too long: would exceed database identifier limit")
