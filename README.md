@@ -108,6 +108,8 @@ export TEST_DATABASE_URL="postgres://user:pass@localhost:5432/postgres"
 
 Or use the default: `postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable`
 
+Each database provider also has a variable of its own that wins over the shared ones, so a project that tests against more than one database server can point each provider at the right one: `TEST_POSTGRES_URL` for PostgreSQL. The full order is `WithAdminDSN`, the provider's variable, `TEST_DATABASE_URL`, `DATABASE_URL`, then the default.
+
 ### Options
 
 ```go
