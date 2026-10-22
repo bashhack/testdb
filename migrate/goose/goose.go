@@ -17,6 +17,8 @@ import (
 	"os"
 	"strings"
 
+	// Registers the "mysql" database/sql driver, and parses native MySQL DSNs.
+	mysqldriver "github.com/go-sql-driver/mysql"
 	// Registers the "pgx" database/sql driver that goose runs through.
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -45,8 +47,8 @@ func WithDialect(dialect goose.Dialect) Option {
 
 // WithSQLDriver sets the database/sql driver name used to connect. The
 // default follows the dialect: "pgx" for PostgreSQL, "mysql" for MySQL and
-// "sqlite" for SQLite. Only the pgx driver is registered by this package;
-// import the others yourself.
+// "sqlite" for SQLite. The pgx and mysql drivers are registered by this
+// package; import any other yourself.
 func WithSQLDriver(name string) Option {
 	return func(m *Migrator) {
 		m.driver = name
@@ -136,10 +138,14 @@ func (m *Migrator) migrations() (fs.FS, error) {
 	return sub, nil
 }
 
-// dialectFromDSN picks the goose dialect from the DSN's scheme.
+// dialectFromDSN picks the goose dialect from the DSN's scheme, or from its
+// shape when it is go-sql-driver's native MySQL form, which has no scheme.
 func dialectFromDSN(dsn string) (goose.Dialect, error) {
 	scheme, _, ok := strings.Cut(dsn, "://")
 	if !ok {
+		if _, err := mysqldriver.ParseDSN(dsn); err == nil {
+			return goose.DialectMySQL, nil
+		}
 		return "", errors.New("goose: cannot infer the dialect from a DSN without a scheme; use goose.WithDialect")
 	}
 	switch strings.ToLower(scheme) {

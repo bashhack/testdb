@@ -30,6 +30,11 @@ func (p *countingProvider) Cleanup(ctx context.Context) error {
 	return p.mockProvider.Cleanup(ctx)
 }
 
+// InspectCommand stands in for a database client invocation.
+func (p *countingProvider) InspectCommand(dsn string) string {
+	return "connect-with " + dsn
+}
+
 func TestCloseDropsByDefault(t *testing.T) {
 	provider := &countingProvider{}
 	db, err := New(t, provider, nil)
@@ -74,8 +79,29 @@ func TestKeepLeavesDatabaseAndLogsHowToConnect(t *testing.T) {
 	if kept == "" {
 		t.Fatalf("expected a 'kept database' log line, got %v", spy.logs)
 	}
-	if !strings.Contains(kept, db.Name()) || !strings.Contains(kept, "psql") || !strings.Contains(kept, db.DSN()) {
-		t.Errorf("kept-database log should name the database and give a psql command with its DSN, got: %s", kept)
+	if !strings.Contains(kept, db.Name()) || !strings.Contains(kept, "connect-with "+db.DSN()) {
+		t.Errorf("kept-database log should name the database and give the provider's connect command, got: %s", kept)
+	}
+}
+
+func TestKeepLogsDSNWhenProviderHasNoInspectCommand(t *testing.T) {
+	spy := &verboseSpyTB{TB: t}
+	db, err := New(spy, &mockProvider{}, nil) // mockProvider has no InspectCommand
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Keep()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var kept string
+	for _, msg := range spy.logs {
+		if strings.Contains(msg, "kept database") {
+			kept = msg
+		}
+	}
+	if !strings.Contains(kept, db.DSN()) {
+		t.Errorf("without an InspectCommander the log should show the DSN, got: %s", kept)
 	}
 }
 

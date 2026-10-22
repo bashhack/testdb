@@ -152,6 +152,14 @@ type TemplateProvider interface {
 	TemplateExists(ctx context.Context, name string) (bool, error)
 }
 
+// InspectCommander is implemented by providers that can say how to open a
+// database in that database's own command-line client (psql, mysql, ...).
+// The kept-database log line (see Keep and WithKeepOnFailure) shows that
+// command; without it, it shows the DSN.
+type InspectCommander interface {
+	InspectCommand(dsn string) string
+}
+
 // DBInitializer defines the interface for custom database initialization in tests.
 //
 // # When You Need a Custom Initializer
@@ -380,8 +388,12 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 
 	td.cleanup = func() error {
 		if td.keep {
+			how := testDSN
+			if ic, ok := provider.(InspectCommander); ok {
+				how = ic.InspectCommand(testDSN)
+			}
 			// Always worth saying, since someone asked to look at it
-			t.Logf("testdb: kept database %s for inspection:\n    psql %q", dbName, testDSN)
+			t.Logf("testdb: kept database %s for inspection:\n    %s", dbName, how)
 		} else {
 			if err := provider.TerminateConnections(cleanupCtx, dbName); err != nil {
 				return &Error{

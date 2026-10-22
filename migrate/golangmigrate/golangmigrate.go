@@ -17,14 +17,17 @@ import (
 	"os"
 	"strings"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/golang-migrate/migrate/v4"
-	// Registers the pgx5:// database driver that this package connects with.
+	// Registers the mysql:// database driver.
+	_ "github.com/golang-migrate/migrate/v4/database/mysql"
+	// Registers the pgx5:// database driver.
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 )
 
-// Migrator applies golang-migrate migrations to a PostgreSQL database.
-// Create one with Dir or FS.
+// Migrator applies golang-migrate migrations to a PostgreSQL or MySQL
+// database. Create one with Dir or FS.
 type Migrator struct {
 	fsys fs.FS
 	path string
@@ -101,18 +104,28 @@ func (m *Migrator) Migrate(ctx context.Context, dsn string) (err error) {
 	return nil
 }
 
-// databaseURL rewrites the DSN's scheme to pgx5, the one golang-migrate's
-// pgx/v5 driver registers; the rest of the URL is the same.
+// databaseURL turns a testdb DSN into the URL golang-migrate's drivers
+// register for: a PostgreSQL URL gets the pgx5 scheme, and go-sql-driver's
+// native MySQL DSN (which has no scheme) is prefixed with mysql://, which is
+// the form golang-migrate's MySQL driver parses.
 func databaseURL(dsn string) (string, error) {
+	if !strings.Contains(dsn, "://") {
+		if _, err := mysqldriver.ParseDSN(dsn); err == nil {
+			return "mysql://" + dsn, nil
+		}
+		return "", errors.New("golangmigrate: the DSN must be a PostgreSQL URL (postgres://...) or a native MySQL DSN (user:pass@tcp(host:port)/db)")
+	}
 	u, err := url.Parse(dsn)
-	if err != nil || u.Scheme == "" {
-		return "", errors.New("golangmigrate: the DSN must be a URL (postgres://...)")
+	if err != nil {
+		return "", fmt.Errorf("golangmigrate: parse DSN: %w", err)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "postgres", "postgresql", "pgx", "pgx5":
 		u.Scheme = "pgx5"
+	case "mysql":
+		return "", errors.New("golangmigrate: give MySQL DSNs in go-sql-driver's native form (user:pass@tcp(host:port)/db), as testdb's mysql package does")
 	default:
-		return "", fmt.Errorf("golangmigrate: unsupported DSN scheme %q; only PostgreSQL is supported", u.Scheme)
+		return "", fmt.Errorf("golangmigrate: unsupported DSN scheme %q", u.Scheme)
 	}
 	return u.String(), nil
 }
