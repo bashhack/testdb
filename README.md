@@ -312,6 +312,143 @@ postgres.Setup(t,
 )
 ```
 
+## Templates
+
+A template is a database you build once, from migrations, a SQL dump or any Go code, that each test then clones in a few milliseconds. Use one when migrations are slow, when you load large fixture files, or when many tests need the same starting data.
+
+### Basic Template Usage
+
+Ensure the template in `TestMain`, use it in tests, release it when the run ends:
+
+```go
+func TestMain(m *testing.M) {
+    ctx := context.Background()
+
+    tpl, err := postgres.EnsureTemplate(ctx, "with_schema",
+        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    code := m.Run()
+
+    if err := tpl.Release(ctx); err != nil {
+        log.Print(err)
+    }
+    os.Exit(code)
+}
+
+func TestUsers(t *testing.T) {
+    // A clone of the template: schema already applied
+    pool := postgres.Setup(t, testdb.WithTemplate("with_schema"))
+    // Start testing immediately
+}
+```
+
+### Safe to Share Between Packages
+
+`go test ./...` runs every package as its own process, and CI often runs several jobs against one server. `EnsureTemplate` is built for that:
+
+- The first process to arrive builds the template; the others wait for it and reuse it. Setup runs once, no matter how many packages share the name.
+- A template is built under a temporary name and renamed into place, so no process ever sees a half-built one.
+- `Release` drops the template only when the last process using it is done. A process that crashes drops out of the count on its own, because its claim on the template dies with its connection.
+- The template is a real PostgreSQL template (`IS_TEMPLATE true`), so a stray `DROP DATABASE` is refused.
+
+Everything sharing a template must use the same admin database; that is where the coordination happens.
+
+### Keeping Templates Between Runs
+
+By default a template lives for one run. To keep it, give it a fingerprint so it is rebuilt when its inputs change and reused when they don't:
+
+```go
+fp, err := postgres.HashFiles("./migrations", "fixtures/us.sql")
+if err != nil {
+    log.Fatal(err)
+}
+tpl, err := postgres.EnsureTemplate(ctx, "us_region", setup,
+    postgres.WithFingerprint(fp),
+    postgres.WithKeepTemplate())
+```
+
+If the fingerprint changed but another process is still using the old template, `EnsureTemplate` returns an error rather than pulling the template out from under it.
+
+### Template with SQL Files
+
+Load SQL dumps or fixture data:
+
+```go
+postgres.EnsureTemplate(ctx, "with_fixtures",
+    postgres.LoadSQLFile("fixtures/seed_data.sql"))
+```
+
+### Template with Custom Setup
+
+Any `func(ctx context.Context, dsn string) error` can build a template:
+
+```go
+setup := func(ctx context.Context, dsn string) error {
+    pool, err := pgxpool.New(ctx, dsn)
+    if err != nil {
+        return err
+    }
+    defer pool.Close()
+
+    _, err = pool.Exec(ctx, `
+        CREATE TABLE test_data (id SERIAL PRIMARY KEY, value INT);
+    `)
+    return err
+}
+
+postgres.EnsureTemplate(ctx, "custom", setup)
+```
+
+### Composite Templates
+
+Combine migrations and fixtures with `Compose`:
+
+```go
+postgres.EnsureTemplate(ctx, "full",
+    postgres.Compose(
+        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose),
+        postgres.LoadSQLFile("fixtures/data.sql"),
+    ))
+```
+
+### Multiple Templates
+
+Different templates for different scenarios:
+
+```go
+func TestMain(m *testing.M) {
+    ctx := context.Background()
+
+    us, err := postgres.EnsureTemplate(ctx, "us_region", postgres.LoadSQLFile("fixtures/us.sql"))
+    if err != nil {
+        log.Fatal(err)
+    }
+    eu, err := postgres.EnsureTemplate(ctx, "eu_region", postgres.LoadSQLFile("fixtures/eu.sql"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    code := m.Run()
+
+    us.Release(ctx)
+    eu.Release(ctx)
+    os.Exit(code)
+}
+
+func TestUSCheckout(t *testing.T) {
+    pool := postgres.Setup(t, testdb.WithTemplate("us_region"))
+    // Test with US data
+}
+
+func TestEUVAT(t *testing.T) {
+    pool := postgres.Setup(t, testdb.WithTemplate("eu_region"))
+    // Test with EU data
+}
+```
+
 ## How It Works
 
 testdb leverages PostgreSQL's `CREATE DATABASE` command for true isolation:

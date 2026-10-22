@@ -20,6 +20,7 @@ import (
 
 	"github.com/bashhack/testdb"
 	"github.com/bashhack/testdb/postgres"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	gormpostgres "gorm.io/driver/postgres"
@@ -1307,6 +1308,94 @@ func TestCleanupStress_ConcurrentDatabases(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestDropDatabase_RetryOn55006 tests that DropDatabase retries when encountering
+// SQLSTATE 55006 ("database is being accessed by other users").
+// This provides coverage for the retry logic in DropDatabase.
+func TestDropDatabase_RetryOn55006(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a provider and initialize it
+	provider := &postgres.PostgresProvider{}
+	cfg := testdb.Config{}
+
+	if err := provider.Initialize(ctx, cfg); err != nil {
+		t.Skipf("PostgreSQL not available: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := provider.Cleanup(ctx); err != nil {
+			t.Errorf("provider cleanup failed: %v", err)
+		}
+	})
+
+	// Create a test database
+	dbName := "test_retry_coverage_" + time.Now().Format("20060102150405")
+	if err := provider.CreateDatabase(ctx, dbName); err != nil {
+		t.Fatalf("CreateDatabase failed: %v", err)
+	}
+
+	// Build DSN for the test database
+	dsn, err := provider.BuildDSN(dbName)
+	if err != nil {
+		t.Fatalf("BuildDSN failed: %v", err)
+	}
+
+	// Open a connection to the database to keep it "in use"
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("Connect to test database failed: %v", err)
+	}
+
+	// Start a long-running query in a goroutine to keep connection active
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// This query will be interrupted by TerminateConnections
+		var result int
+		_ = conn.QueryRow(ctx, "SELECT pg_sleep(30)").Scan(&result)
+	}()
+
+	// Give the query a moment to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Terminate connections (this sends signals but doesn't wait for completion)
+	if err := provider.TerminateConnections(ctx, dbName); err != nil {
+		t.Fatalf("TerminateConnections failed: %v", err)
+	}
+
+	// DropDatabase should retry if it hits 55006 due to connection not fully closed yet
+	// This exercises the retry logic code paths
+	start := time.Now()
+	if err := provider.DropDatabase(ctx, dbName); err != nil {
+		t.Fatalf("DropDatabase failed even with retry logic: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Wait for the goroutine to finish with the connection before closing it,
+	// otherwise Close races with the interrupted query's Scan
+	<-done
+	// Its backend was terminated above, so a close error here is expected
+	// and only worth noting
+	if err := conn.Close(ctx); err != nil {
+		t.Logf("closing terminated connection: %v", err)
+	}
+
+	// If retry logic activated, we'd expect it to take at least 10ms (first retry)
+	// But we can't assert this reliably as the timing race might not trigger every time
+	t.Logf("DropDatabase completed in %v (retry logic available if needed)", elapsed)
+
+	// Verify database no longer exists by attempting to connect
+	// This should fail with "database does not exist"
+	testConn, err := pgx.Connect(ctx, dsn)
+	if err == nil {
+		if closeErr := testConn.Close(ctx); closeErr != nil {
+			t.Logf("closing connection to undropped database: %v", closeErr)
+		}
+		t.Fatal("Database still exists after DropDatabase - retry logic may have failed")
+	}
+
+	// Success - database was dropped (with or without retry, depending on timing)
 }
 
 // isExpectedCleanupError returns true if the error matches expected cleanup errors.

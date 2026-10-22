@@ -754,6 +754,14 @@ func (m *mockErrorProvider) Cleanup(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockErrorProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error {
+	return errors.New("templates not supported in mock")
+}
+
+func (m *mockErrorProvider) TemplateExists(ctx context.Context, name string) (bool, error) {
+	return false, nil
+}
+
 // spyTB is a testing.TB implementation that captures Cleanup calls
 type spyTB struct {
 	testing.TB
@@ -816,6 +824,14 @@ func (m *mockProvider) ResolvedAdminDSN() string {
 
 func (m *mockProvider) Cleanup(ctx context.Context) error {
 	return nil
+}
+
+func (m *mockProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error {
+	return nil
+}
+
+func (m *mockProvider) TemplateExists(ctx context.Context, name string) (bool, error) {
+	return true, nil
 }
 
 type verboseSpyTB struct {

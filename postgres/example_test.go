@@ -549,3 +549,233 @@ func Example_parallelExecution() {
 	// Note: This example demonstrates the API but cannot be executed as a runnable
 	// example because it uses t.Run() which requires a real testing.T instance.
 }
+
+// Example_templateWithMigrations demonstrates using templates to avoid running
+// migrations for every test.
+func Example_templateWithMigrations() {
+	ctx := context.Background()
+
+	// In TestMain: ensure the template once, with migrations applied
+	tpl, err := postgres.EnsureTemplate(ctx, "with_schema",
+		postgres.LoadMigrations("../testdata/postgres/migrations_goose", testdb.MigrationToolGoose))
+	if err != nil {
+		fmt.Printf("Error creating template: %v\n", err)
+		return
+	}
+	defer func() {
+		if err := tpl.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
+
+	// In your test: Clone from template (fast!)
+	t := &testing.T{}
+	db := postgres.New(t, &postgres.PoolInitializer{},
+		testdb.WithTemplate("with_schema"))
+
+	pool := db.Entity().(*pgxpool.Pool)
+
+	// Schema already applied from template - start testing immediately
+	var exists bool
+	err = pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT FROM information_schema.tables
+			WHERE table_name = 'products'
+		)
+	`).Scan(&exists)
+
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	if exists {
+		fmt.Println("Products table exists from migrations")
+	}
+
+	// Note: This example demonstrates the API but cannot be executed as a runnable
+	// example because it uses testing.T.
+}
+
+// Example_templateComposite demonstrates combining migrations with fixtures.
+func Example_templateComposite() {
+	ctx := context.Background()
+
+	// In TestMain: ensure a template with both migrations and fixtures
+	setupFunc := func(ctx context.Context, dsn string) error {
+		// First run migrations to create schema
+		if err := postgres.LoadMigrations("../testdata/postgres/migrations_goose", testdb.MigrationToolGoose)(ctx, dsn); err != nil {
+			return err
+		}
+		// Then load fixture data
+		// return postgres.LoadSQLFile("fixtures/products.sql")(ctx, dsn)
+		return nil
+	}
+
+	tpl, err := postgres.EnsureTemplate(ctx, "ecommerce_full", setupFunc)
+	if err != nil {
+		fmt.Printf("Error creating template: %v\n", err)
+		return
+	}
+	defer func() {
+		if err := tpl.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
+
+	// In your test: Get fully populated database instantly
+	t := &testing.T{}
+	db := postgres.New(t, &postgres.PoolInitializer{},
+		testdb.WithTemplate("ecommerce_full"))
+
+	pool := db.Entity().(*pgxpool.Pool)
+
+	var exists bool
+	err = pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT FROM information_schema.tables
+			WHERE table_name = 'products'
+		)
+	`).Scan(&exists)
+
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	if exists {
+		fmt.Println("Schema and data ready")
+	}
+
+	// Note: This example demonstrates the API but cannot be executed as a runnable
+	// example because it uses testing.T.
+}
+
+// Example_multipleTemplates demonstrates using multiple templates for different
+// test scenarios.
+func Example_multipleTemplates() {
+	ctx := context.Background()
+
+	// In TestMain: ensure one template per scenario
+	us, err := postgres.EnsureTemplate(ctx, "us_region", nil)
+	if err != nil {
+		fmt.Printf("Error creating template: %v\n", err)
+		return
+	}
+	defer func() {
+		if err := us.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
+	eu, err := postgres.EnsureTemplate(ctx, "eu_region", nil)
+	if err != nil {
+		fmt.Printf("Error creating template: %v\n", err)
+		return
+	}
+	defer func() {
+		if err := eu.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
+
+	t := &testing.T{}
+
+	// US checkout test uses US data
+	dbUS := postgres.New(t, &postgres.PoolInitializer{},
+		testdb.WithTemplate("us_region"))
+	poolUS := dbUS.Entity().(*pgxpool.Pool)
+
+	// EU VAT test uses EU data
+	dbEU := postgres.New(t, &postgres.PoolInitializer{},
+		testdb.WithTemplate("eu_region"))
+	poolEU := dbEU.Entity().(*pgxpool.Pool)
+
+	// Each test has isolated regional data
+	var usDB, euDB string
+	if err := poolUS.QueryRow(ctx, "SELECT current_database()").Scan(&usDB); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	if err := poolEU.QueryRow(ctx, "SELECT current_database()").Scan(&euDB); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	if usDB != euDB {
+		fmt.Println("Each template has isolated database")
+	}
+
+	// Note: This example demonstrates the API but cannot be executed as a runnable
+	// example because it uses testing.T.
+}
+
+// Example_templateCustomSetup demonstrates using a custom setup function for
+// programmatic data generation.
+func Example_templateCustomSetup() {
+	ctx := context.Background()
+
+	// In TestMain: ensure a template with custom Go setup logic
+	setupFunc := func(ctx context.Context, dsn string) error {
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+
+		// Create schema
+		_, err = pool.Exec(ctx, `
+			CREATE TABLE test_data (
+				id SERIAL PRIMARY KEY,
+				value INTEGER NOT NULL
+			)
+		`)
+		if err != nil {
+			return err
+		}
+
+		// Programmatically generate dataset
+		for i := range 100 {
+			_, err = pool.Exec(ctx,
+				"INSERT INTO test_data (value) VALUES ($1)", i)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	tpl, err := postgres.EnsureTemplate(ctx, "large_dataset", setupFunc)
+	if err != nil {
+		fmt.Printf("Error creating template: %v\n", err)
+		return
+	}
+	defer func() {
+		if err := tpl.Release(ctx); err != nil {
+			fmt.Printf("Error releasing template: %v\n", err)
+		}
+	}()
+
+	// In your test: Dataset already generated
+	t := &testing.T{}
+	db := postgres.New(t, &postgres.PoolInitializer{},
+		testdb.WithTemplate("large_dataset"))
+
+	pool := db.Entity().(*pgxpool.Pool)
+
+	var count int
+	err = pool.QueryRow(context.Background(),
+		"SELECT COUNT(*) FROM test_data").Scan(&count)
+
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	if count > 0 {
+		fmt.Println("Dataset loaded from template")
+	}
+
+	// Note: This example demonstrates the API but cannot be executed as a runnable
+	// example because it uses testing.T.
+}
