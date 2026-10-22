@@ -134,16 +134,14 @@ func TestTemplateConcurrentProcesses(t *testing.T) {
 	errs := make([]error, procs)
 	var wg sync.WaitGroup
 	for i := range procs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			cmd := concurrencyProcess(bin,
 				"TESTDB_CONC_TEMPLATE="+name,
 				"TESTDB_CONC_SETUP_LOG="+setupLog,
 				"TESTDB_CONC_FINGERPRINT=v1",
 				"TESTDB_CONC_HOLD=2s")
 			outs[i], errs[i] = cmd.CombinedOutput()
-		}()
+		})
 	}
 	wg.Wait()
 
