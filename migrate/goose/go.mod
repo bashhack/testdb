@@ -3,7 +3,7 @@ module github.com/bashhack/testdb/migrate/goose
 go 1.26.0
 
 require (
-	github.com/bashhack/testdb v0.0.0
+	github.com/bashhack/testdb v0.1.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/pressly/goose/v3 v3.29.0
@@ -20,5 +20,3 @@ require (
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )
-
-replace github.com/bashhack/testdb => ../..
