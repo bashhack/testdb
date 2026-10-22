@@ -142,10 +142,11 @@ type Provider interface {
 type TemplateProvider interface {
 	Provider
 
-	// CreateDatabaseFromTemplate creates a new database by cloning a template.
-	// This is significantly faster than CreateDatabase for databases with large schemas
-	// or pre-seeded data. The template database must already exist.
-	CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error
+	// CreateDatabaseFromTemplate makes a database cloned from the template
+	// and returns its name: requestedName, or a different one when the
+	// provider had a clone ready in advance and cannot rename it. The
+	// template database must already exist.
+	CreateDatabaseFromTemplate(ctx context.Context, requestedName, templateName string) (actualName string, err error)
 
 	// TemplateExists checks if a template database exists.
 	// This is useful for debugging and conditional template creation.
@@ -344,24 +345,27 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 		}
 	}
 
-	if cfg.Verbose {
-		if cfg.TemplateName != "" {
-			t.Logf("testdb: creating database %s from template %s", dbName, cfg.TemplateName)
-		} else {
-			t.Logf("testdb: creating database %s", dbName)
-		}
-	}
-
 	// Use template if specified, otherwise create fresh database
 	if cfg.TemplateName != "" {
-		// Checked above
-		if err := provider.(TemplateProvider).CreateDatabaseFromTemplate(ctx, dbName, cfg.TemplateName); err != nil {
+		// Checked above. The provider may hand over a database it cloned in
+		// advance, under a name of its own.
+		actual, err := provider.(TemplateProvider).CreateDatabaseFromTemplate(ctx, dbName, cfg.TemplateName)
+		if err != nil {
 			return nil, &Error{
 				Op:  "provider.CreateDatabaseFromTemplate",
 				Err: err,
 			}
 		}
+		if actual != "" {
+			dbName = actual
+		}
+		if cfg.Verbose {
+			t.Logf("testdb: database %s cloned from template %s", dbName, cfg.TemplateName)
+		}
 	} else {
+		if cfg.Verbose {
+			t.Logf("testdb: creating database %s", dbName)
+		}
 		if err := provider.CreateDatabase(ctx, dbName); err != nil {
 			return nil, &Error{
 				Op:  "provider.CreateDatabase",

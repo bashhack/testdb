@@ -194,7 +194,7 @@ func (p *PostgresProvider) CreateDatabase(ctx context.Context, name string) erro
 //
 // The template database must already exist; postgres.EnsureTemplate creates
 // it and keeps it alive while this process uses it.
-func (p *PostgresProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error {
+func (p *PostgresProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) (string, error) {
 	quotedName := pgx.Identifier{name}.Sanitize()
 	quotedTemplate := pgx.Identifier{templateName}.Sanitize()
 
@@ -203,12 +203,13 @@ func (p *PostgresProvider) CreateDatabaseFromTemplate(ctx context.Context, name,
 	if err != nil {
 		// Check if error is due to non-existent template and provide helpful message
 		if strings.Contains(err.Error(), "does not exist") {
-			return fmt.Errorf("template database %q does not exist (create it with postgres.EnsureTemplate): %w", templateName, err)
+			return "", fmt.Errorf("template database %q does not exist (create it with postgres.EnsureTemplate): %w", templateName, err)
 		}
-		return fmt.Errorf("create database from template: %w", err)
+		return "", fmt.Errorf("create database from template: %w", err)
 	}
 
-	return nil
+	// PostgreSQL clones on demand, so the database is the one asked for
+	return name, nil
 }
 
 // TemplateExists checks if a template database exists.

@@ -270,6 +270,14 @@ func ResolveAdminDSN(cfg Config, defaultDSN string, providerEnv ...string) strin
 	return defaultDSN
 }
 
+// NewDatabaseName returns a unique database name with the given prefix, in
+// the form every test database gets: {prefix}_{timestamp}_{random}, for
+// example test_1699564231_a1b2c3d4. Providers that prepare databases ahead
+// of a test use it so those look like any other test database.
+func NewDatabaseName(prefix string) (string, error) {
+	return generateDatabaseName(prefix)
+}
+
 // generateDatabaseName creates a unique database name with the given prefix.
 // Format: {prefix}_{timestamp}_{random}
 //

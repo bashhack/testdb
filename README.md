@@ -11,18 +11,19 @@
 - **Zero Docker** - Uses native PostgreSQL CREATE DATABASE
 - **Auto Cleanup** - Databases are dropped automatically
 - **Migration Support** - goose, tern and golang-migrate through their Go libraries, or plain SQL files; nothing to install
-- **PostgreSQL Support** - Production-ready with pgxpool
+- **PostgreSQL and MySQL** - The same API and the same guarantees on both; pgxpool for PostgreSQL, database/sql for MySQL
 
 ## Quick Start
 
 ### Prerequisites
 
-A running PostgreSQL server (local installation, managed instance, or remote). testdb connects to PostgreSQL - it doesn't manage the server itself.
+A running PostgreSQL or MySQL server (local installation, managed instance, or remote). testdb connects to it - it doesn't manage the server itself.
 
 ### Install
 
 ```bash
-go get github.com/bashhack/testdb/postgres
+go get github.com/bashhack/testdb/postgres   # PostgreSQL
+go get github.com/bashhack/testdb/mysql      # MySQL
 ```
 
 ### Basic Usage
@@ -108,7 +109,7 @@ export TEST_DATABASE_URL="postgres://user:pass@localhost:5432/postgres"
 
 Or use the default: `postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable`
 
-Each database provider also has a variable of its own that wins over the shared ones, so a project that tests against more than one database server can point each provider at the right one: `TEST_POSTGRES_URL` for PostgreSQL. The full order is `WithAdminDSN`, the provider's variable, `TEST_DATABASE_URL`, `DATABASE_URL`, then the default.
+Each database provider also has a variable of its own that wins over the shared ones, so a project that tests against more than one database server can point each provider at the right one: `TEST_POSTGRES_URL` for PostgreSQL, `TEST_MYSQL_URL` for MySQL. The full order is `WithAdminDSN`, the provider's variable, `TEST_DATABASE_URL`, `DATABASE_URL`, then the default.
 
 ### Options
 
@@ -142,7 +143,7 @@ TESTDB_KEEP_ON_FAILURE=1 go test ./... -run TestCheckout
         psql "postgres://postgres:postgres@localhost:5432/test_1761100000_a1b2c3d4?sslmode=disable"
 ```
 
-Passing tests still clean up after themselves. The same switch exists in code as `testdb.WithKeepOnFailure()`, and with the low-level `testdb.New` you call `db.Keep()` yourself. Kept databases are yours to drop afterwards; a `WithDBPrefix` makes them easy to find. Leave this off in CI, where nobody will look and the databases would only pile up.
+Passing tests still clean up after themselves. The same switch exists in code as `testdb.WithKeepOnFailure()`, and with the low-level `testdb.New` you call `db.Keep()` yourself. On MySQL the log line gives a `mysql` command line instead. Kept databases are yours to drop afterwards; a `WithDBPrefix` makes them easy to find. Leave this off in CI, where nobody will look and the databases would only pile up.
 
 ## Advanced Usage
 
@@ -285,7 +286,23 @@ pool := postgres.Setup(t,
 )
 ```
 
-Currently, only PostgreSQL is supported. Additional database support can be added by implementing the `testdb.Provider` interface.
+### MySQL
+
+```go
+import "github.com/bashhack/testdb/mysql"
+
+db := mysql.Setup(t,                       // *sql.DB
+    testdb.WithMigrator(goose.Dir("./migrations")),
+)
+```
+
+The admin connection string may be in go-sql-driver's native form (`user:pass@tcp(host:port)/?parseTime=true`) or a `mysql://` URL, from `TEST_MYSQL_URL` or the shared variables; the default is `root:root@tcp(localhost:3306)/?parseTime=true`. The user needs `CREATE`/`DROP DATABASE` and the right to kill other sessions (`CONNECTION_ADMIN`), which `root` has.
+
+Two things about MySQL that testdb handles for you. `DROP DATABASE` does not refuse while other sessions are connected, it waits for the locks they hold (by default, for a year); cleanup kills the test's sessions first and bounds the wait at five seconds, so a leaked transaction can never hang a test run. And a MySQL database with 50 tables takes about half a second to create however you do it, so for speed see [Templates on MySQL](#templates-on-mysql).
+
+For the fastest possible test server, start it without durability, as `docker-compose.test.yml` does: `--innodb-flush-log-at-trx-commit=0 --sync-binlog=0 --skip-log-bin --innodb-doublewrite=0`. Tested against MySQL 8.4; MariaDB is likely to work but is not tested.
+
+Other databases can be added by implementing `testdb.Provider`, plus `testdb.TemplateProvider` for templates.
 
 ## Migrations
 
@@ -309,7 +326,7 @@ pool := postgres.Setup(t, testdb.WithMigrator(postgres.SQLFiles("./schema")))
 
 ### goose, tern, golang-migrate
 
-Each adapter is its own Go module, so your project only depends on the tool it uses:
+Each adapter is its own Go module, so your project only depends on the tool it uses. goose and golang-migrate work with PostgreSQL and MySQL; tern is PostgreSQL-only.
 
 ```bash
 go get github.com/bashhack/testdb/migrate/goose          # github.com/pressly/goose
@@ -446,6 +463,27 @@ postgres.EnsureTemplate(ctx, "full",
         postgres.LoadSQLFile("fixtures/data.sql"),
     ))
 ```
+
+### Templates on MySQL
+
+`mysql.EnsureTemplate`, `Release`, `WithFingerprint`, `WithKeepTemplate` and `testdb.WithTemplate` work exactly as above, with the same guarantees across processes. What differs is underneath, because MySQL has no way to clone a database:
+
+- A clone is made object by object: tables (indexes, foreign keys, checks, `AUTO_INCREMENT` positions), rows, views, triggers, procedures and functions. Not copied: events and grants.
+- That clone costs the server's per-table DDL, about 0.5–0.8 s for a 50-table schema on a laptop, no faster than running the migrations. So a MySQL template **prepares clones ahead of demand**: `WithReadyDatabases(n)` (default `GOMAXPROCS`) keeps `n` databases cloned and ready, refilled in the background by `WithReadyWorkers` parallel workers, and a test takes one instead of waiting. When the pool runs dry, the test clones on demand rather than wait.
+
+Measured on MySQL 8.4 in Docker on a laptop, 50 tables with an index each, 5,000 rows:
+
+| | per test |
+|---|---|
+| empty database | 8 ms |
+| fresh database + migrations | 498 ms |
+| clone on demand | 768 ms |
+| prepared clone, tests of 200 ms or longer | **6 ms**, 100% from the pool |
+| prepared clone, 50 ms tests back to back | 130–200 ms, 83–92% from the pool |
+
+The pool keeps up as long as tests take clones no faster than the server makes them. For integration tests, which do real work, that holds comfortably and every test pays 6 ms. In a tight loop of trivial tests the floor is your server's clone throughput; more workers help until the server saturates.
+
+Bookkeeping lives in `_testdb_*` tables inside the template (never copied into clones). A process that dies leaves nothing permanent: its hold on the template and its prepared databases are swept by the next `EnsureTemplate` or `Release` on that template.
 
 ### Multiple Templates
 
