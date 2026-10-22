@@ -164,9 +164,13 @@ func TestTemplateSurvivesKilledProcess(t *testing.T) {
 		return err == nil
 	})
 	users := qualify(name, bookkeepingPrefix+"users")
-	readyTable := qualify(name, bookkeepingPrefix+"ready")
+	readyPattern := strings.ReplaceAll(readyPrefix, "_", `\_`) + `\_%`
+	// The pool records a database before cloning into it, so wait for the
+	// databases themselves, not the records; a kill that lands mid-clone
+	// is a fine case for the sweep, but the assertion below needs both
+	// databases to exist
 	waitUntil(t, 30*time.Second, "holder's pool to fill", func() bool {
-		return scanInt(t, admin, "SELECT COUNT(*) FROM "+readyTable) == 2
+		return schemasLike(t, admin, readyPattern) == 2
 	})
 	if n := scanInt(t, admin, "SELECT COUNT(*) FROM "+users); n != 1 {
 		t.Fatalf("%d template users registered while the holder runs, want 1\n%s", n, holderOut.String())
@@ -187,7 +191,7 @@ func TestTemplateSurvivesKilledProcess(t *testing.T) {
 	waitUntil(t, 10*time.Second, "the killed process's session to end", func() bool {
 		return scanInt(t, admin, "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE id = ?", holderConn) == 0
 	})
-	if n := schemasLike(t, admin, strings.ReplaceAll(readyPrefix, "_", `\_`)+`\_%`); n != 2 {
+	if n := schemasLike(t, admin, readyPattern); n != 2 {
 		t.Fatalf("expected the dead process's 2 prepared databases to still exist before the sweep, found %d", n)
 	}
 
@@ -208,7 +212,7 @@ func TestTemplateSurvivesKilledProcess(t *testing.T) {
 	if schemaExists(t, admin, name) {
 		t.Errorf("template %s was left behind: a dead process kept it alive", name)
 	}
-	if n := schemasLike(t, admin, strings.ReplaceAll(readyPrefix, "_", `\_`)+`\_%`); n != 0 {
+	if n := schemasLike(t, admin, readyPattern); n != 0 {
 		t.Errorf("%d prepared databases of the dead process were not swept", n)
 	}
 }
