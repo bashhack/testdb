@@ -1,0 +1,113 @@
+// Package golangmigrate runs golang-migrate/migrate migrations for testdb
+// through its Go library, so no migrate binary is needed.
+//
+//	pool := postgres.Setup(t, testdb.WithMigrator(golangmigrate.Dir("./migrations")))
+//
+// A Migrator's Migrate method is also a template setup function:
+//
+//	tpl, err := postgres.EnsureTemplate(ctx, "schema", golangmigrate.Dir("./migrations").Migrate)
+package golangmigrate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/url"
+	"os"
+	"strings"
+
+	"github.com/golang-migrate/migrate/v4"
+	// Registers the pgx5:// database driver that this package connects with.
+	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
+)
+
+// Migrator applies golang-migrate migrations to a PostgreSQL database.
+// Create one with Dir or FS.
+type Migrator struct {
+	fsys fs.FS
+	path string
+	dir  string // set by Dir, for a clear error when it does not exist
+}
+
+// Dir returns a Migrator for the migration files in a directory on disk.
+func Dir(dir string) *Migrator {
+	return &Migrator{fsys: os.DirFS(dir), path: ".", dir: dir}
+}
+
+// FS returns a Migrator for the migration files under path in fsys, which
+// lets migrations ship inside the test binary with embed.FS:
+//
+//	//go:embed migrations/*.sql
+//	var migrations embed.FS
+//
+//	golangmigrate.FS(migrations, "migrations")
+func FS(fsys fs.FS, path string) *Migrator {
+	return &Migrator{fsys: fsys, path: path}
+}
+
+// Migrate applies every pending up migration to the database at dsn. It
+// stops between migrations if ctx is cancelled.
+func (m *Migrator) Migrate(ctx context.Context, dsn string) (err error) {
+	if m.dir != "" {
+		if _, err := os.Stat(m.dir); err != nil {
+			return fmt.Errorf("golangmigrate: migrations directory: %w", err)
+		}
+	}
+	source, err := iofs.New(m.fsys, m.path)
+	if err != nil {
+		return fmt.Errorf("golangmigrate: read migrations: %w", err)
+	}
+	dbURL, err := databaseURL(dsn)
+	if err != nil {
+		return err
+	}
+
+	mg, err := migrate.NewWithSourceInstance("iofs", source, dbURL)
+	if err != nil {
+		return fmt.Errorf("golangmigrate: %w", err)
+	}
+	defer func() {
+		sourceErr, dbErr := mg.Close()
+		err = errors.Join(err, sourceErr, dbErr)
+	}()
+
+	// Up has no context of its own; GracefulStop asks it to stop after the
+	// migration it is on.
+	done := make(chan error, 1)
+	go func() { done <- mg.Up() }()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		select {
+		case mg.GracefulStop <- true:
+		default:
+		}
+		<-done
+		return ctx.Err()
+	}
+	if errors.Is(err, migrate.ErrNoChange) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("golangmigrate: up: %w", err)
+	}
+	return nil
+}
+
+// databaseURL rewrites the DSN's scheme to pgx5, the one golang-migrate's
+// pgx/v5 driver registers; the rest of the URL is the same.
+func databaseURL(dsn string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme == "" {
+		return "", errors.New("golangmigrate: the DSN must be a URL (postgres://...)")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "postgres", "postgresql", "pgx", "pgx5":
+		u.Scheme = "pgx5"
+	default:
+		return "", fmt.Errorf("golangmigrate: unsupported DSN scheme %q; only PostgreSQL is supported", u.Scheme)
+	}
+	return u.String(), nil
+}

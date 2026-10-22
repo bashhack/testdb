@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -411,37 +410,62 @@ func TestTransactions(t *testing.T) {
 	}
 }
 
-func TestMigrationOptions(t *testing.T) {
-	t.Run("WithMigrations_Tern", func(t *testing.T) {
-		pool := postgres.Setup(t,
-			testdb.WithMigrations("../testdata/postgres/migrations_tern"),
-			testdb.WithMigrationTool(testdb.MigrationToolTern))
-
+func TestMigratorOptions(t *testing.T) {
+	tableExists := func(t *testing.T, pool *pgxpool.Pool, table string) bool {
+		t.Helper()
 		var exists bool
 		err := pool.QueryRow(context.Background(),
-			"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'users')").Scan(&exists)
+			"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)", table).Scan(&exists)
 		if err != nil {
 			t.Fatalf("failed to check table existence: %v", err)
 		}
-		if !exists {
-			t.Fatal("expected users table to exist after migration")
+		return exists
+	}
+
+	t.Run("SQLFiles", func(t *testing.T) {
+		pool := postgres.Setup(t,
+			testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")))
+
+		for _, table := range []string{"test_table", "users", "products"} {
+			if !tableExists(t, pool, table) {
+				t.Errorf("expected %s table to exist after SQLFiles", table)
+			}
 		}
 	})
 
-	t.Run("WithMigrations_Goose", func(t *testing.T) {
+	t.Run("LoadSQLFile", func(t *testing.T) {
 		pool := postgres.Setup(t,
-			testdb.WithMigrations("../testdata/postgres/migrations_goose"),
-			testdb.WithMigrationTool("goose"),
-		)
+			testdb.WithMigrator(postgres.LoadSQLFile("../testdata/postgres/schema/002_users.sql")))
 
-		var exists bool
-		err := pool.QueryRow(context.Background(),
-			"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'products')").Scan(&exists)
-		if err != nil {
-			t.Fatalf("failed to check table existence: %v", err)
+		if !tableExists(t, pool, "users") {
+			t.Fatal("expected users table to exist after LoadSQLFile")
 		}
-		if !exists {
-			t.Fatal("expected products table to exist after migration")
+		if tableExists(t, pool, "products") {
+			t.Fatal("LoadSQLFile ran more than the one file")
+		}
+	})
+
+	t.Run("MigratorFunc", func(t *testing.T) {
+		var gotDSN string
+		pool := postgres.Setup(t,
+			testdb.WithMigrator(testdb.MigratorFunc(func(ctx context.Context, dsn string) error {
+				gotDSN = dsn
+				return nil
+			})))
+
+		var current string
+		if err := pool.QueryRow(context.Background(), "SELECT current_database()").Scan(&current); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(gotDSN, "/"+current) {
+			t.Errorf("migrator received DSN %q, which is not for database %q", gotDSN, current)
+		}
+	})
+
+	t.Run("SQLFiles_empty_dir_is_an_error", func(t *testing.T) {
+		err := postgres.SQLFiles(t.TempDir())(context.Background(), "postgres://unused")
+		if err == nil || !strings.Contains(err.Error(), "no .sql files") {
+			t.Fatalf("expected a 'no .sql files' error, got: %v", err)
 		}
 	})
 }
@@ -492,25 +516,6 @@ func TestDSNParsing(t *testing.T) {
 				t.Fatalf("query failed: %v", err)
 			}
 		})
-	}
-}
-
-func TestWithMigrationToolPath(t *testing.T) {
-	ternPath, err := exec.LookPath("tern")
-	if err != nil {
-		t.Skip("tern not found in PATH, skipping test")
-	}
-
-	pool := postgres.Setup(t,
-		testdb.WithMigrations("../testdata/postgres/migrations_tern"),
-		testdb.WithMigrationTool(testdb.MigrationToolTern),
-		testdb.WithMigrationToolPath(ternPath))
-
-	var tableName string
-	err = pool.QueryRow(context.Background(),
-		"SELECT tablename FROM pg_tables WHERE tablename = 'users'").Scan(&tableName)
-	if err != nil {
-		t.Fatalf("users table should exist after migration: %v", err)
 	}
 }
 
@@ -724,8 +729,7 @@ func TestSetupMigrationErrorHandling(t *testing.T) {
 
 	// Use non-existent migration directory to trigger migration error
 	postgres.Setup(spy,
-		testdb.WithMigrations("/nonexistent/migration/path"),
-		testdb.WithMigrationTool(testdb.MigrationToolTern))
+		testdb.WithMigrator(postgres.SQLFiles("/nonexistent/migration/path")))
 }
 
 func TestNewErrorHandling(t *testing.T) {
@@ -782,8 +786,7 @@ func TestNewMigrationErrorHandling(t *testing.T) {
 
 	// Use non-existent migration directory to trigger migration error
 	postgres.New(spy, initializer,
-		testdb.WithMigrations("/nonexistent/migration/path"),
-		testdb.WithMigrationTool(testdb.MigrationToolTern))
+		testdb.WithMigrator(postgres.SQLFiles("/nonexistent/migration/path")))
 }
 
 func TestNewNilInitializer(t *testing.T) {
@@ -1012,8 +1015,7 @@ func TestCleanupOnMigrationFailure(t *testing.T) {
 	// Use WithVerbose to capture database name from logs
 	postgres.Setup(spy,
 		testdb.WithDBPrefix("migration_cleanup_test"),
-		testdb.WithMigrations("/nonexistent/migration/path"),
-		testdb.WithMigrationTool(testdb.MigrationToolTern),
+		testdb.WithMigrator(postgres.SQLFiles("/nonexistent/migration/path")),
 		testdb.WithVerbose())
 }
 

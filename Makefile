@@ -4,6 +4,10 @@ ifneq (,$(wildcard .env))
 	export
 endif
 
+# Every package in the workspace. The migration adapters under migrate/ are
+# separate modules, so ./... alone covers only the root module.
+PKGS := ./... ./migrate/goose/... ./migrate/tern/... ./migrate/golangmigrate/...
+
 # % is a wildcard character that matches anything, so if make doesn't find a rule
 # for a target, it uses this rule. The @ beneath is a no-op command. Using these
 # together allows us to define a rule that matches anything, but doesn't do anything.
@@ -28,48 +32,6 @@ confirm:
 # ============================================================================= #
 # DEVELOPMENT
 # ============================================================================= #
-
-## tools/check/tern: Check if tern is installed
-.PHONY: tools/check/tern
-tools/check/tern:
-	@if ! command -v tern >/dev/null 2>&1; then \
-		echo "Error: 'tern' is not installed."; \
-		echo "Install with: go install github.com/jackc/tern/v2@latest"; \
-		echo "Or run: make tools/install"; \
-		exit 1; \
-	fi
-
-## tools/check/goose: Check if goose is installed
-.PHONY: tools/check/goose
-tools/check/goose:
-	@if ! command -v goose >/dev/null 2>&1; then \
-		echo "Error: 'goose' is not installed."; \
-		echo "Install with: go install github.com/pressly/goose/v3/cmd/goose@latest"; \
-		echo "Or run: make tools/install"; \
-		exit 1; \
-	fi
-
-## tools/check/migrate: Check if migrate is installed
-.PHONY: tools/check/migrate
-tools/check/migrate:
-	@if ! command -v migrate >/dev/null 2>&1; then \
-		echo "Error: 'migrate' is not installed."; \
-		echo "Install with: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest"; \
-		echo "Or run: make tools/install"; \
-		exit 1; \
-	fi
-
-## tools/install: Install optional migration tools (tern, goose, and migrate)
-.PHONY: tools/install
-tools/install:
-	@echo 'Installing migration tools...'
-	@echo 'Installing tern...'
-	@go install github.com/jackc/tern/v2@latest
-	@echo 'Installing goose...'
-	@go install github.com/pressly/goose/v3/cmd/goose@latest
-	@echo 'Installing migrate...'
-	@go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-	@echo '✅ Migration tools installed'
 
 # ============================================================================= #
 # DOCUMENTATION
@@ -201,7 +163,7 @@ test/db/execute:
 .PHONY: test
 test: test/db/start
 	@echo 'Running tests...'
-	go test -v ./...
+	go test -v $(PKGS)
 
 ## test/postgres: Run PostgreSQL tests only
 .PHONY: test/postgres
@@ -213,13 +175,13 @@ test/postgres: test/db/start
 .PHONY: test/parallel
 test/parallel: test/db/start
 	@echo 'Running tests in parallel...'
-	go test -v -parallel 10 ./...
+	go test -v -parallel 10 $(PKGS)
 
 ## test/race: Run tests with race detector
 .PHONY: test/race
 test/race: test/db/start
 	@echo 'Running tests with race detector...'
-	go test -race -v ./...
+	go test -race -v $(PKGS)
 
 # ============================================================================= #
 # QUALITY CONTROL
@@ -251,13 +213,13 @@ check-golangci-lint:
 .PHONY: run-staticcheck
 run-staticcheck: check-staticcheck
 	@echo 'Running staticcheck...'
-	@staticcheck ./... || echo "Note: staticcheck found issues (exit code: $$?)"
+	@staticcheck $(PKGS) || echo "Note: staticcheck found issues (exit code: $$?)"
 
 ## run-golangci-lint: Run golangci-lint if it exists
 .PHONY: run-golangci-lint
 run-golangci-lint: check-golangci-lint
 	@echo 'Running golangci-lint...'
-	@golangci-lint run ./... || echo "Note: golangci-lint found issues (exit code: $$?)"
+	@golangci-lint run $(PKGS) || echo "Note: golangci-lint found issues (exit code: $$?)"
 
 ## security/scan: Run security scan
 .PHONY: security/scan
@@ -266,14 +228,14 @@ security/scan:
 		echo "Error: 'gosec' is not installed. Installing..."; \
 		go install github.com/securego/gosec/v2/cmd/gosec@latest; \
 	fi
-	gosec ./...
+	gosec $(PKGS)
 
 ## lint: Run linters
 .PHONY: lint
 lint:
 	@echo 'Linting...'
 	@echo 'Running go vet...'
-	@go vet ./...
+	@go vet $(PKGS)
 	@$(MAKE) run-golangci-lint || echo "Skipping external linting"
 	@$(MAKE) run-staticcheck || echo "Skipping staticcheck"
 
@@ -284,13 +246,13 @@ audit:
 	go mod tidy
 	go mod verify
 	@echo 'Formatting code...'
-	go fmt ./...
+	go fmt $(PKGS)
 	@echo 'Vetting code...'
-	go vet ./...
+	go vet $(PKGS)
 	@$(MAKE) run-staticcheck || echo "Skipping staticcheck"
 	@$(MAKE) run-golangci-lint || echo "Skipping external linting"
 	@echo 'Running tests...'
-	go test -short -vet=off ./...
+	go test -short -vet=off $(PKGS)
 	@echo '✅ Audit complete'
 
 ## audit/long: Run all tests including long-running tests (no -short flag)
@@ -301,15 +263,15 @@ audit/long:
 	@go mod tidy
 	@go mod verify
 	@echo 'Formatting code...'
-	@go fmt ./...
+	@go fmt $(PKGS)
 	@echo 'Vetting code...'
-	@go vet ./...
+	@go vet $(PKGS)
 	@$(MAKE) run-staticcheck || echo "Skipping staticcheck"
 	@$(MAKE) run-golangci-lint || echo "Skipping external linting"
 	@echo 'Starting test database...'
 	@$(MAKE) test/db/start
 	@echo 'Running ALL tests (including long tests, 10 minute timeout, no cache, with race detection)...'
-	@go test -race -count=1 -timeout=10m -vet=off ./...
+	@go test -race -count=1 -timeout=10m -vet=off $(PKGS)
 	@echo '✅ Full audit complete (including long tests)'
 
 ## audit/security: Run security audit
@@ -331,20 +293,20 @@ vendor:
 ## coverage: Run test suite with coverage
 .PHONY: coverage
 coverage:
-	go test -coverprofile=coverage.txt ./...
+	go test -coverprofile=coverage.txt $(PKGS)
 	go tool cover -html=coverage.txt -o coverage.html
 
 ## fmt: Format all code
 .PHONY: fmt
 fmt:
 	@echo 'Formatting code...'
-	go fmt ./...
+	go fmt $(PKGS)
 
 ## vet: Vet all code
 .PHONY: vet
 vet:
 	@echo 'Vetting code...'
-	go vet ./...
+	go vet $(PKGS)
 
 ## tidy: Tidy module dependencies
 .PHONY: tidy

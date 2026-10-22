@@ -18,30 +18,22 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("Expected default DBPrefix to be 'test', got '%s'", cfg.DBPrefix)
 	}
 
-	if cfg.MigrationTool != "" {
-		t.Errorf("Expected default MigrationTool to be empty, got '%s'", cfg.MigrationTool)
+	if cfg.Migrator != nil {
+		t.Errorf("Expected default Migrator to be nil, got %T", cfg.Migrator)
 	}
 
 	if cfg.AdminDSNOverride != "" {
 		t.Errorf("Expected default AdminDSN to be empty, got '%s'", cfg.AdminDSNOverride)
 	}
-
-	if cfg.MigrationDir != "" {
-		t.Errorf("Expected default MigrationDir to be empty, got '%s'", cfg.MigrationDir)
-	}
-
-	if cfg.MigrationToolPath != "" {
-		t.Errorf("Expected default MigrationToolPath to be empty, got '%s'", cfg.MigrationToolPath)
-	}
 }
 
-func TestWithMigrations(t *testing.T) {
+func TestWithMigrator(t *testing.T) {
 	cfg := DefaultConfig()
-	opt := WithMigrations("./migrations")
+	opt := WithMigrator(MigratorFunc(func(context.Context, string) error { return nil }))
 	opt(&cfg)
 
-	if cfg.MigrationDir != "./migrations" {
-		t.Errorf("Expected MigrationDir to be './migrations', got '%s'", cfg.MigrationDir)
+	if cfg.Migrator == nil {
+		t.Fatal("Expected Migrator to be set")
 	}
 }
 
@@ -53,27 +45,6 @@ func TestWithAdminDSN(t *testing.T) {
 
 	if cfg.AdminDSNOverride != dsn {
 		t.Errorf("Expected AdminDSN to be '%s', got '%s'", dsn, cfg.AdminDSNOverride)
-	}
-}
-
-func TestWithMigrationTool(t *testing.T) {
-	cfg := DefaultConfig()
-	opt := WithMigrationTool(MigrationToolGoose)
-	opt(&cfg)
-
-	if cfg.MigrationTool != MigrationToolGoose {
-		t.Errorf("Expected MigrationTool to be 'goose', got '%s'", cfg.MigrationTool)
-	}
-}
-
-func TestWithMigrationToolPath(t *testing.T) {
-	cfg := DefaultConfig()
-	path := "/usr/local/bin/tern"
-	opt := WithMigrationToolPath(path)
-	opt(&cfg)
-
-	if cfg.MigrationToolPath != path {
-		t.Errorf("Expected MigrationToolPath to be '%s', got '%s'", path, cfg.MigrationToolPath)
 	}
 }
 
@@ -172,10 +143,8 @@ func TestMultipleOptions(t *testing.T) {
 	cfg := DefaultConfig()
 
 	opts := []Option{
-		WithMigrations("./migrations"),
+		WithMigrator(MigratorFunc(func(context.Context, string) error { return nil })),
 		WithAdminDSN("postgres://localhost/db"),
-		WithMigrationTool(MigrationToolGoose),
-		WithMigrationToolPath("/usr/bin/goose"),
 		WithDBPrefix("custom"),
 	}
 
@@ -183,17 +152,11 @@ func TestMultipleOptions(t *testing.T) {
 		opt(&cfg)
 	}
 
-	if cfg.MigrationDir != "./migrations" {
-		t.Errorf("Expected MigrationDir to be './migrations', got '%s'", cfg.MigrationDir)
+	if cfg.Migrator == nil {
+		t.Error("Expected Migrator to be set")
 	}
 	if cfg.AdminDSNOverride != "postgres://localhost/db" {
 		t.Errorf("Expected AdminDSN to be 'postgres://localhost/db', got '%s'", cfg.AdminDSNOverride)
-	}
-	if cfg.MigrationTool != MigrationToolGoose {
-		t.Errorf("Expected MigrationTool to be 'goose', got '%s'", cfg.MigrationTool)
-	}
-	if cfg.MigrationToolPath != "/usr/bin/goose" {
-		t.Errorf("Expected MigrationToolPath to be '/usr/bin/goose', got '%s'", cfg.MigrationToolPath)
 	}
 	if cfg.DBPrefix != "custom" {
 		t.Errorf("Expected DBPrefix to be 'custom', got '%s'", cfg.DBPrefix)
@@ -310,42 +273,6 @@ func TestErrorTypes(t *testing.T) {
 	}
 }
 
-func TestDriverFromDSN(t *testing.T) {
-	tests := map[string]struct {
-		dsn      string
-		expected string
-		wantErr  bool
-	}{
-		"postgres scheme":   {"postgres://localhost/db", "postgres", false},
-		"postgresql scheme": {"postgresql://localhost/db", "postgres", false},
-		"mysql scheme":      {"mysql://localhost/db", "mysql", false},
-		"sqlite3 scheme":    {"sqlite3://path/to/db", "sqlite3", false},
-		"sqlite scheme":     {"sqlite://path/to/db", "sqlite3", false},
-		"unknown scheme":    {"unknown://localhost/db", "", true},
-		"empty dsn":         {"", "", true},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			driver, err := driverFromDSN(tc.dsn)
-			if tc.wantErr {
-				if err == nil {
-					t.Error("Expected error but got none")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-
-			if driver != tc.expected {
-				t.Errorf("Expected driver '%s', got '%s'", tc.expected, driver)
-			}
-		})
-	}
-}
-
 func TestNewWithNilProvider(t *testing.T) {
 	_, err := New(t, nil, nil)
 	if err == nil {
@@ -457,7 +384,7 @@ func TestCloseWithoutInitializer(t *testing.T) {
 	}
 }
 
-func TestRunMigrationsNoDir(t *testing.T) {
+func TestRunMigrationsNoMigrator(t *testing.T) {
 	provider := &mockProvider{}
 	db, err := New(t, provider, nil)
 	if err != nil {
@@ -469,9 +396,9 @@ func TestRunMigrationsNoDir(t *testing.T) {
 		}
 	}()
 
-	err = db.RunMigrations()
+	err = db.RunMigrations(t.Context())
 	if err == nil {
-		t.Fatal("Expected error when migration directory is not set")
+		t.Fatal("Expected error when no migrator is configured")
 	}
 
 	var testErr *Error
@@ -479,17 +406,19 @@ func TestRunMigrationsNoDir(t *testing.T) {
 		t.Fatal("Expected error to be *testdb.Error")
 	}
 
-	if !errors.Is(testErr.Err, ErrNoMigrationDir) {
-		t.Errorf("Expected ErrNoMigrationDir, got %v", testErr.Err)
+	if !errors.Is(testErr.Err, ErrNoMigrator) {
+		t.Errorf("Expected ErrNoMigrator, got %v", testErr.Err)
 	}
 }
 
-func TestRunMigrationsUnknownTool(t *testing.T) {
+func TestRunMigrations(t *testing.T) {
 	provider := &mockProvider{}
+	var gotDSN string
 	db, err := New(t, provider, nil,
-		WithMigrations("./migrations"),
-		WithMigrationTool("unknown"))
-
+		WithMigrator(MigratorFunc(func(ctx context.Context, dsn string) error {
+			gotDSN = dsn
+			return nil
+		})))
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
@@ -499,18 +428,35 @@ func TestRunMigrationsUnknownTool(t *testing.T) {
 		}
 	}()
 
-	err = db.RunMigrations()
-	if err == nil {
-		t.Fatal("Expected error with unknown migration tool")
+	if err := db.RunMigrations(t.Context()); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
 	}
+	if gotDSN != db.DSN() {
+		t.Errorf("migrator received DSN %q, want the test database's %q", gotDSN, db.DSN())
+	}
+}
 
+func TestRunMigrationsError(t *testing.T) {
+	provider := &mockProvider{}
+	boom := errors.New("migration exploded")
+	db, err := New(t, provider, nil,
+		WithMigrator(MigratorFunc(func(context.Context, string) error { return boom })))
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("Failed to close database: %v", err)
+		}
+	}()
+
+	err = db.RunMigrations(t.Context())
+	if !errors.Is(err, boom) {
+		t.Fatalf("Expected the migrator's error to be returned, got %v", err)
+	}
 	var testErr *Error
-	if !errors.As(err, &testErr) {
-		t.Fatal("Expected error to be *testdb.Error")
-	}
-
-	if !errors.Is(testErr.Err, ErrUnknownMigrationTool) {
-		t.Errorf("Expected ErrUnknownMigrationTool, got %v", testErr.Err)
+	if !errors.As(err, &testErr) || testErr.Op != "RunMigrations" {
+		t.Errorf("Expected *testdb.Error with Op RunMigrations, got %#v", err)
 	}
 }
 

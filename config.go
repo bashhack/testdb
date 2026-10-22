@@ -1,6 +1,7 @@
 package testdb
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -25,24 +26,10 @@ type Config struct {
 	// Use this when you need custom admin credentials or connection settings.
 	AdminDSNOverride string
 
-	// MigrationDir is the absolute or relative path to migration files.
-	// If set, MigrationTool must also be set (and vice versa).
-	//
-	// Example: "./migrations" or "/path/to/project/migrations"
-	MigrationDir string
-
-	// MigrationTool specifies which migration tool to use.
-	// Supported: "tern", "goose", "migrate"
-	// If set, MigrationDir must also be set (and vice versa).
-	//
-	// Example: testdb.MigrationToolTern, testdb.MigrationToolGoose, testdb.MigrationToolMigrate
-	MigrationTool MigrationTool
-
-	// MigrationToolPath is the path to the migration tool binary.
-	// If empty, the tool is assumed to be in PATH.
-	//
-	// Example: "/usr/local/bin/tern"
-	MigrationToolPath string
+	// Migrator prepares each new test database, typically by running the
+	// project's migrations. nil (the default) leaves the database empty.
+	// See WithMigrator.
+	Migrator Migrator
 
 	// DBPrefix is prepended to test database names.
 	// Useful for identifying test databases in a shared environment.
@@ -73,43 +60,44 @@ type Config struct {
 	Verbose bool
 }
 
-// MigrationTool represents supported database migration tools.
-type MigrationTool string
+// Migrator prepares a freshly created, empty database: it runs migrations,
+// loads fixtures, or does whatever the tests need to find in place. It
+// receives the DSN of the database to prepare.
+//
+// Adapters for the common migration tools live in their own modules, so a
+// project only depends on the tool it uses:
+//   - github.com/bashhack/testdb/migrate/goose
+//   - github.com/bashhack/testdb/migrate/tern
+//   - github.com/bashhack/testdb/migrate/golangmigrate
+//
+// For plain SQL without a tool, see postgres.SQLFiles and postgres.LoadSQLFile.
+// Template setup functions have the same shape (postgres.SetupFunc is a
+// MigratorFunc), so one Migrator serves both per-test databases and templates.
+type Migrator interface {
+	Migrate(ctx context.Context, dsn string) error
+}
 
-const (
-	// MigrationToolTern represents the 'tern' migration tool.
-	// External dependency: Must be installed separately and available in PATH.
-	// See: https://github.com/jackc/tern
-	// PostgreSQL only.
-	MigrationToolTern MigrationTool = "tern"
+// MigratorFunc adapts a function to the Migrator interface.
+type MigratorFunc func(ctx context.Context, dsn string) error
 
-	// MigrationToolGoose represents the 'goose' migration tool.
-	// External dependency: Must be installed separately and available in PATH.
-	// See: https://github.com/pressly/goose
-	// Supports PostgreSQL, MySQL, SQLite.
-	MigrationToolGoose MigrationTool = "goose"
-
-	// MigrationToolMigrate represents the 'golang-migrate/migrate' migration tool.
-	// External dependency: Must be installed separately and available in PATH.
-	// See: https://github.com/golang-migrate/migrate
-	// Supports PostgreSQL, MySQL, SQLite, MongoDB, and many others.
-	MigrationToolMigrate MigrationTool = "migrate"
-)
+// Migrate calls f.
+func (f MigratorFunc) Migrate(ctx context.Context, dsn string) error {
+	return f(ctx, dsn)
+}
 
 // Option is a functional option for configuring test databases.
 type Option func(*Config)
 
-// WithMigrations sets the migration directory.
-// The directory should contain your migration files.
-// You must also set WithMigrationTool() when using this option.
+// WithMigrator sets how each new test database is prepared before the test
+// gets it. Setup and New run the migrator right after creating the database.
 //
 // Example:
 //
-//	testdb.WithMigrations("./migrations")
-//	testdb.WithMigrations("../../db/migrations")
-func WithMigrations(dir string) Option {
+//	pool := postgres.Setup(t, testdb.WithMigrator(goose.Dir("./migrations")))
+//	pool := postgres.Setup(t, testdb.WithMigrator(postgres.SQLFiles("./schema")))
+func WithMigrator(m Migrator) Option {
 	return func(c *Config) {
-		c.MigrationDir = dir
+		c.Migrator = m
 	}
 }
 
@@ -125,32 +113,6 @@ func WithMigrations(dir string) Option {
 func WithAdminDSN(dsn string) Option {
 	return func(c *Config) {
 		c.AdminDSNOverride = dsn
-	}
-}
-
-// WithMigrationTool sets the migration tool to use.
-// You must also set WithMigrations() when using this option.
-// Valid values: testdb.MigrationToolTern, testdb.MigrationToolGoose, testdb.MigrationToolMigrate
-//
-// Example:
-//
-//	testdb.WithMigrationTool(testdb.MigrationToolGoose)
-//	testdb.WithMigrationTool(testdb.MigrationToolMigrate)
-func WithMigrationTool(tool MigrationTool) Option {
-	return func(c *Config) {
-		c.MigrationTool = tool
-	}
-}
-
-// WithMigrationToolPath sets the path to the migration tool binary.
-// Use this if the tool is not in your PATH.
-//
-// Example:
-//
-//	testdb.WithMigrationToolPath("/usr/local/bin/goose")
-func WithMigrationToolPath(path string) Option {
-	return func(c *Config) {
-		c.MigrationToolPath = path
 	}
 }
 
@@ -299,17 +261,8 @@ var (
 	// ErrNilProvider is returned when a nil provider is passed to New().
 	ErrNilProvider = errors.New("provider cannot be nil")
 
-	// ErrNoMigrationDir is returned when RunMigrations is called without a migration directory.
-	ErrNoMigrationDir = errors.New("migration directory not set")
-
-	// ErrUnknownMigrationTool is returned when an unknown migration tool is configured.
-	ErrUnknownMigrationTool = errors.New("unknown migration tool")
-
-	// ErrMigrationToolWithoutDir is returned when a migration tool is specified without a directory.
-	ErrMigrationToolWithoutDir = errors.New("migration tool specified but migration directory not set")
-
-	// ErrMigrationDirWithoutTool is returned when a migration directory is specified without a tool.
-	ErrMigrationDirWithoutTool = errors.New("migration directory specified but migration tool not set")
+	// ErrNoMigrator is returned when RunMigrations is called without a Migrator configured.
+	ErrNoMigrator = errors.New("no migrator configured")
 
 	// ErrPrefixTooLong is returned when the database prefix would cause identifier truncation.
 	ErrPrefixTooLong = errors.New("database prefix too long: would exceed database identifier limit")
@@ -337,16 +290,6 @@ func (e *Error) Unwrap() error {
 
 // validateConfig validates the configuration for consistency.
 func validateConfig(cfg Config) error {
-	// If migration directory is set, migration tool must be set
-	if cfg.MigrationDir != "" && cfg.MigrationTool == "" {
-		return ErrMigrationDirWithoutTool
-	}
-
-	// If migration tool is set, migration directory must be set
-	if cfg.MigrationTool != "" && cfg.MigrationDir == "" {
-		return ErrMigrationToolWithoutDir
-	}
-
 	// Validate prefix length to prevent database identifier truncation.
 	// Database name format: prefix_timestamp_random (prefix + 29 chars)
 	// Limit based on most restrictive database (PostgreSQL: 63 bytes, MySQL: 64 chars).

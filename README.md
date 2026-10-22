@@ -10,7 +10,7 @@
 - **Parallel Tests** - Run tests concurrently with `t.Parallel()`
 - **Zero Docker** - Uses native PostgreSQL CREATE DATABASE
 - **Auto Cleanup** - Databases are dropped automatically
-- **Migration Support** - Works with Tern, Goose, and golang-migrate
+- **Migration Support** - goose, tern and golang-migrate through their Go libraries, or plain SQL files; nothing to install
 - **PostgreSQL Support** - Production-ready with pgxpool
 
 ## Quick Start
@@ -35,14 +35,14 @@ import (
     "testing"
 
     "github.com/bashhack/testdb"
+    "github.com/bashhack/testdb/migrate/goose"
     "github.com/bashhack/testdb/postgres"
 )
 
 func TestUsers(t *testing.T) {
     // Create isolated test database with your migrations
     pool := postgres.Setup(t,
-        testdb.WithMigrations("./migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolTern),
+        testdb.WithMigrator(goose.Dir("./migrations")),
     )
 
     // Use the database - tables from migrations are ready
@@ -68,7 +68,7 @@ testdb uses PostgreSQL's native `CREATE DATABASE` to give each test its own isol
 
 **True parallelism** - Run hundreds of tests concurrently with `t.Parallel()`. Each test has its own database, eliminating coordination complexity.
 
-**Standard tooling** - Integrates with existing migration tools (Tern, Goose, golang-migrate). Use the migrations you already have.
+**Standard tooling** - Use the migrations you already have, run through goose, tern or golang-migrate's own Go libraries. No binaries on PATH, no version drift between CI and laptops.
 
 **Shared database approach:**
 ```go
@@ -90,8 +90,7 @@ func TestUsers(t *testing.T) {
     t.Parallel() // Safe - each test has its own database
 
     pool := postgres.Setup(t,
-        testdb.WithMigrations("./migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolTern),
+        testdb.WithMigrator(goose.Dir("./migrations")),
     )
     // Complete isolation - no state leakage possible
 }
@@ -113,18 +112,16 @@ Or use the default: `postgres://postgres:postgres@localhost:5432/postgres?sslmod
 
 ```go
 pool := postgres.Setup(t,
-    testdb.WithMigrations("./migrations"),
-    testdb.WithMigrationTool(testdb.MigrationToolTern),
+    testdb.WithMigrator(goose.Dir("./migrations")),
     testdb.WithAdminDSN("postgres://custom:5432/postgres"),
     testdb.WithDBPrefix("myapp_test"),
 )
 ```
 
 Available options:
-- `WithMigrations(dir)` - Set migration directory (requires WithMigrationTool)
-- `WithMigrationTool(tool)` - Use tern, goose, or migrate (requires WithMigrations)
+- `WithMigrator(m)` - How each new database is prepared: a migration-tool adapter, `postgres.SQLFiles(dir)`, or any `func(ctx, dsn) error`
+- `WithTemplate(name)` - Clone a template database instead of starting empty (see Templates)
 - `WithAdminDSN(dsn)` - Override admin connection string
-- `WithMigrationToolPath(path)` - Path to migration binary
 - `WithDBPrefix(prefix)` - Database name prefix (default: "test")
 - `WithVerbose()` - Enable verbose logging for debugging
 
@@ -191,8 +188,7 @@ func (m *MyInitializer) InitializeTestDatabase(ctx context.Context, dsn string) 
 
 func TestAdvanced(t *testing.T) {
     db := postgres.New(t, &MyInitializer{},
-        testdb.WithMigrations("./migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolTern),
+        testdb.WithMigrator(goose.Dir("./migrations")),
     )
     myDB := db.Entity().(*myapp.DB)
     // Use your custom DB type
@@ -206,15 +202,14 @@ If you want full control over connections without an initializer:
 ```go
 provider := &postgres.PostgresProvider{}
 db, err := testdb.New(t, provider, nil,
-    testdb.WithMigrations("./migrations"),
-    testdb.WithMigrationTool(testdb.MigrationToolTern),
+    testdb.WithMigrator(goose.Dir("./migrations")),
 )
 if err != nil {
     t.Fatalf("Failed to create database: %v", err)
 }
 
-// Run migrations manually if needed
-if err := db.RunMigrations(); err != nil {
+// With testdb.New you decide when migrations run
+if err := db.RunMigrations(t.Context()); err != nil {
     t.Fatalf("Migrations failed: %v", err)
 }
 
@@ -232,8 +227,7 @@ defer db.Close()
 func setupDB(t *testing.T) *pgxpool.Pool {
     t.Helper()
     return postgres.Setup(t,
-        testdb.WithMigrations("./migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolTern),
+        testdb.WithMigrator(goose.Dir("./migrations")),
     )
 }
 
@@ -268,49 +262,69 @@ This is useful for testing the library itself, but production applications shoul
 import "github.com/bashhack/testdb/postgres"
 
 pool := postgres.Setup(t,
-    testdb.WithMigrations("./migrations"),
-    testdb.WithMigrationTool(testdb.MigrationToolTern),
+    testdb.WithMigrator(goose.Dir("./migrations")),
 )
 ```
 
 Currently, only PostgreSQL is supported. Additional database support can be added by implementing the `testdb.Provider` interface.
 
-## Migration Tools
+## Migrations
 
-testdb supports three migration tools. Both `WithMigrations()` and `WithMigrationTool()` must be specified together.
-
-### Tern (PostgreSQL-only)
-
-Install: `go install github.com/jackc/tern/v2@latest`
+`testdb.WithMigrator` takes anything that can prepare a database from a DSN:
 
 ```go
-postgres.Setup(t,
-    testdb.WithMigrations("./migrations"),
-    testdb.WithMigrationTool(testdb.MigrationToolTern),
-)
+type Migrator interface {
+    Migrate(ctx context.Context, dsn string) error
+}
 ```
 
-### Goose (Multi-database)
+The migrations run inside your test process, under the test's context, so a hung migration stops when the test times out and there is no binary to install or keep in sync.
 
-Install: `go install github.com/pressly/goose/v3/cmd/goose@latest`
+### Plain SQL files
+
+No tool needed. `SQLFiles` runs every `.sql` file in a directory in lexical order:
 
 ```go
-postgres.Setup(t,
-    testdb.WithMigrations("./migrations"),
-    testdb.WithMigrationTool(testdb.MigrationToolGoose),
-)
+pool := postgres.Setup(t, testdb.WithMigrator(postgres.SQLFiles("./schema")))
 ```
 
-### golang-migrate (Multi-database)
+### goose, tern, golang-migrate
 
-Install: `go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest`
+Each adapter is its own Go module, so your project only depends on the tool it uses:
+
+```bash
+go get github.com/bashhack/testdb/migrate/goose          # github.com/pressly/goose
+go get github.com/bashhack/testdb/migrate/tern           # github.com/jackc/tern
+go get github.com/bashhack/testdb/migrate/golangmigrate  # github.com/golang-migrate/migrate
+```
 
 ```go
-postgres.Setup(t,
-    testdb.WithMigrations("./migrations"),
-    testdb.WithMigrationTool(testdb.MigrationToolMigrate),
-)
+pool := postgres.Setup(t, testdb.WithMigrator(goose.Dir("./migrations")))
+pool := postgres.Setup(t, testdb.WithMigrator(tern.Dir("./migrations")))
+pool := postgres.Setup(t, testdb.WithMigrator(golangmigrate.Dir("./migrations")))
 ```
+
+All three also accept an `fs.FS`, so migrations can be embedded with `embed.FS`:
+
+```go
+//go:embed migrations/*.sql
+var migrations embed.FS
+
+pool := postgres.Setup(t, testdb.WithMigrator(goose.FS(migrations, "migrations")))
+```
+
+### Your own code
+
+Any function with the right shape is a migrator:
+
+```go
+pool := postgres.Setup(t, testdb.WithMigrator(testdb.MigratorFunc(
+    func(ctx context.Context, dsn string) error {
+        return myapp.Migrate(ctx, dsn)
+    })))
+```
+
+A migrator's `Migrate` method is also a template setup function, so the same value builds a template once instead of migrating every test (see Templates).
 
 ## Templates
 
@@ -325,7 +339,7 @@ func TestMain(m *testing.M) {
     ctx := context.Background()
 
     tpl, err := postgres.EnsureTemplate(ctx, "with_schema",
-        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose))
+        goose.Dir("./migrations").Migrate)
     if err != nil {
         log.Fatal(err)
     }
@@ -409,7 +423,7 @@ Combine migrations and fixtures with `Compose`:
 ```go
 postgres.EnsureTemplate(ctx, "full",
     postgres.Compose(
-        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose),
+        goose.Dir("./migrations").Migrate,
         postgres.LoadSQLFile("fixtures/data.sql"),
     ))
 ```
@@ -466,7 +480,7 @@ testdb leverages PostgreSQL's `CREATE DATABASE` command for true isolation:
 See [postgres/example_test.go](postgres/example_test.go) for runnable examples demonstrating:
 
 - Basic database creation and isolation
-- Using Tern, Goose, and golang-migrate
+- Applying a schema from SQL files or your own migrator
 - Running tests concurrently with `t.Parallel()`
 - Custom prefixes and configuration options
 - Using GORM and other ORMs
@@ -477,8 +491,7 @@ All examples are also visible in the [package documentation](https://pkg.go.dev/
 ## Requirements
 
 - PostgreSQL server running locally or accessible
-- Migration tool (tern, goose, or migrate) in PATH if using migrations
-- Go 1.24+
+- Go 1.27+
 
 ## License
 

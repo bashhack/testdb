@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bashhack/testdb"
@@ -21,9 +22,13 @@ import (
 
 // SetupFunc populates a template database. It receives a DSN for the freshly
 // created, empty database and loads whatever the template should contain:
-// schema, fixtures, seed data. See LoadSQLFile, LoadMigrations and Compose
-// for ready-made setup functions.
-type SetupFunc func(ctx context.Context, dsn string) error
+// schema, fixtures, seed data. See SQLFiles, LoadSQLFile and Compose for
+// ready-made setup functions; a migration-tool adapter's Migrate method
+// (for example goose.Dir("./migrations").Migrate) is one as well.
+//
+// SetupFunc is testdb.MigratorFunc, so anything that prepares a template
+// also works per test through testdb.WithMigrator.
+type SetupFunc = testdb.MigratorFunc
 
 // Template is this process's handle on a template database obtained from
 // EnsureTemplate. It keeps one connection to the admin database open for as
@@ -531,59 +536,75 @@ func HashFiles(paths ...string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// LoadSQLFile returns a setup function that runs a SQL file against the
-// template, for SQL dumps and fixture data.
+// LoadSQLFile returns a setup function that runs one SQL file against the
+// database, for SQL dumps and fixture data. It also works per test:
 //
 //	postgres.EnsureTemplate(ctx, "fixtures",
 //	    postgres.LoadSQLFile("fixtures/seed_data.sql"))
+//	postgres.Setup(t, testdb.WithMigrator(postgres.LoadSQLFile("schema.sql")))
 func LoadSQLFile(path string) SetupFunc {
 	return func(ctx context.Context, dsn string) error {
+		return execSQLFiles(ctx, dsn, []string{path})
+	}
+}
+
+// SQLFiles returns a setup function that runs every .sql file in dir, in
+// lexical order, against the database: the simplest way to apply a schema
+// without a migration tool. Name files so they sort the way they should run
+// (001_users.sql, 002_orders.sql). The directory is read when the function
+// runs, not when it is created.
+//
+//	postgres.Setup(t, testdb.WithMigrator(postgres.SQLFiles("./schema")))
+func SQLFiles(dir string) SetupFunc {
+	return func(ctx context.Context, dsn string) error {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return fmt.Errorf("read SQL directory: %w", err)
+		}
+		var paths []string
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".sql") {
+				paths = append(paths, filepath.Join(dir, entry.Name()))
+			}
+		}
+		if len(paths) == 0 {
+			return fmt.Errorf("no .sql files in %s", dir)
+		}
+		return execSQLFiles(ctx, dsn, paths)
+	}
+}
+
+// execSQLFiles runs the files in order on one connection. Every file is read
+// before connecting, so a missing file fails without touching the database.
+func execSQLFiles(ctx context.Context, dsn string, paths []string) error {
+	contents := make([]string, len(paths))
+	for i, path := range paths {
 		sqlBytes, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("read SQL file %s: %w", path, err)
 		}
-		conn, err := pgx.Connect(ctx, dsn)
-		if err != nil {
-			return fmt.Errorf("connect to database: %w", err)
-		}
-		_, execErr := conn.Exec(ctx, string(sqlBytes))
-		closeErr := conn.Close(ctx)
-		if execErr != nil {
-			return fmt.Errorf("execute SQL from %s: %w", path, execErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close connection: %w", closeErr)
-		}
-		return nil
+		contents[i] = string(sqlBytes)
 	}
-}
 
-// LoadMigrations returns a setup function that runs the migrations in dir
-// with the given tool, so the template carries the schema and tests skip
-// migrating.
-//
-// Supported migration tools:
-//   - testdb.MigrationToolTern (PostgreSQL-only)
-//   - testdb.MigrationToolGoose (multi-database)
-//   - testdb.MigrationToolMigrate (multi-database)
-//
-// For example:
-//
-//	postgres.EnsureTemplate(ctx, "with_schema",
-//	    postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose))
-func LoadMigrations(dir string, tool testdb.MigrationTool) SetupFunc {
-	return func(_ context.Context, dsn string) error {
-		switch tool {
-		case testdb.MigrationToolGoose:
-			return testdb.ExecuteGooseMigrations(dsn, dir, "")
-		case testdb.MigrationToolTern:
-			return testdb.ExecuteTernMigrations(dsn, dir, "")
-		case testdb.MigrationToolMigrate:
-			return testdb.ExecuteMigrateMigrations(dsn, dir, "")
-		default:
-			return fmt.Errorf("unsupported migration tool: %v", tool)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("connect to database: %w", err)
+	}
+	var execErr error
+	for i, sql := range contents {
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			execErr = fmt.Errorf("execute SQL from %s: %w", paths[i], err)
+			break
 		}
 	}
+	closeErr := conn.Close(ctx)
+	if execErr != nil {
+		return execErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close connection: %w", closeErr)
+	}
+	return nil
 }
 
 // Compose runs several setup functions in order, stopping at the first
@@ -591,7 +612,7 @@ func LoadMigrations(dir string, tool testdb.MigrationTool) SetupFunc {
 //
 //	postgres.EnsureTemplate(ctx, "full",
 //	    postgres.Compose(
-//	        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose),
+//	        goose.Dir("./migrations").Migrate,
 //	        postgres.LoadSQLFile("fixtures/seed.sql"),
 //	    ))
 func Compose(setupFuncs ...SetupFunc) SetupFunc {
