@@ -1368,9 +1368,10 @@ func TestDropDatabase_RetryOn55006(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// Close the connection (it's already been terminated, this is cleanup)
+	// Wait for the goroutine to finish with the connection before closing it,
+	// otherwise Close races with the interrupted query's Scan
+	<-done
 	conn.Close(ctx)
-	<-done // Wait for goroutine
 
 	// If retry logic activated, we'd expect it to take at least 10ms (first retry)
 	// But we can't assert this reliably as the timing race might not trigger every time
