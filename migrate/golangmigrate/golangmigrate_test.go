@@ -64,8 +64,8 @@ func TestMissingDirectory(t *testing.T) {
 
 func TestNonURLDSN(t *testing.T) {
 	err := golangmigrate.Dir(migrationsDir).Migrate(context.Background(), "host=localhost dbname=x")
-	if err == nil || !strings.Contains(err.Error(), "must be a URL") {
-		t.Fatalf("expected a URL DSN error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "must be a PostgreSQL URL") {
+		t.Fatalf("expected a DSN form error, got: %v", err)
 	}
 }
 

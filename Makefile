@@ -58,6 +58,9 @@ POSTGRES_PORT := 5432
 POSTGRES_USER := postgres
 POSTGRES_PASSWORD := postgres
 POSTGRES_DB := testdb
+MYSQL_SERVICE := test-mysql
+MYSQL_USER := root
+MYSQL_PASSWORD := root
 
 .PHONY: check_pgcli
 check_pgcli:
@@ -83,12 +86,30 @@ define wait_for_postgres
 	echo "✅ Postgres is ready!"
 endef
 
+# mysqladmin ping answers before the server accepts SQL, so wait for a query.
+define wait_for_mysql
+	@echo "Waiting for MySQL to be ready..."
+	@attempts=0; \
+	while ! docker compose -f $(1) exec -T $(2) mysql -u$(3) -p$(4) -e 'SELECT 1' >/dev/null 2>&1; do \
+		attempts=$$((attempts+1)); \
+		if [ $$attempts -gt 60 ]; then \
+			echo "❌ MySQL failed to become ready after 60 seconds"; \
+			echo "Try 'make $(5)' for a fresh start"; \
+			exit 1; \
+		fi; \
+		echo "⏳ Waiting... ($$attempts/60)"; \
+		sleep 1; \
+	done; \
+	echo "✅ MySQL is ready!"
+endef
+
 ## test/db/start: Start PostgreSQL test database
 .PHONY: test/db/start
 test/db/start:
 	@echo 'Starting test database...'
 	docker compose -f $(POSTGRES_COMPOSE_FILE) up -d
 	$(call wait_for_postgres,$(POSTGRES_COMPOSE_FILE),$(POSTGRES_SERVICE),$(POSTGRES_USER),$(POSTGRES_DB),test/db/restart)
+	$(call wait_for_mysql,$(POSTGRES_COMPOSE_FILE),$(MYSQL_SERVICE),$(MYSQL_USER),$(MYSQL_PASSWORD),test/db/restart)
 
 ## test/db/stop: Stop PostgreSQL test database
 .PHONY: test/db/stop
@@ -117,8 +138,9 @@ test/db/clean:
 test/db/restart: test/db/clean
 	@echo "Starting fresh Postgres instance..."
 	docker compose -f $(POSTGRES_COMPOSE_FILE) build --force-rm --no-cache $(POSTGRES_SERVICE)
-	docker compose -f $(POSTGRES_COMPOSE_FILE) up -d $(POSTGRES_SERVICE)
+	docker compose -f $(POSTGRES_COMPOSE_FILE) up -d
 	$(call wait_for_postgres,$(POSTGRES_COMPOSE_FILE),$(POSTGRES_SERVICE),$(POSTGRES_USER),$(POSTGRES_DB),test/db/restart)
+	$(call wait_for_mysql,$(POSTGRES_COMPOSE_FILE),$(MYSQL_SERVICE),$(MYSQL_USER),$(MYSQL_PASSWORD),test/db/restart)
 
 ## test/db/psql: Connect to Postgres database
 .PHONY: test/db/psql

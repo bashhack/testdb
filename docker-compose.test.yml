@@ -22,3 +22,24 @@ services:
       - "full_page_writes=off"
       - "-c"
       - "max_connections=300"
+
+  test-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysql", "-uroot", "-proot", "-e", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # Durability off, as for Postgres above: this server only ever holds
+    # throwaway test databases, and these settings make every DDL and drop
+    # markedly faster.
+    command:
+      - "--innodb-flush-log-at-trx-commit=0"
+      - "--sync-binlog=0"
+      - "--skip-log-bin"
+      - "--innodb-doublewrite=0"
+      - "--innodb-flush-method=O_DIRECT_NO_FSYNC"

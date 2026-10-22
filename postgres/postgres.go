@@ -96,8 +96,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -327,42 +327,16 @@ func (p *PostgresProvider) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-// runMigrationsIfConfigured runs the configured Migrator, if there is one.
-// It calls t.Fatalf if migrations fail, so this function does not return on error.
-func runMigrationsIfConfigured(t testing.TB, db *testdb.TestDatabase, callerName string) {
-	if db.Config().Migrator != nil {
-		if err := db.RunMigrations(testdb.ContextOf(t)); err != nil {
-			if closeErr := db.Close(); closeErr != nil {
-				t.Logf("Warning: failed to close database after migration error: %v", closeErr)
-			}
-			t.Fatalf("%s: migrations failed: %v", callerName, err)
-		}
-	}
+// InspectCommand returns a psql command line that opens the database, for
+// the kept-database log (see testdb.WithKeepOnFailure).
+func (p *PostgresProvider) InspectCommand(dsn string) string {
+	return "psql " + strconv.Quote(dsn)
 }
 
-// registerCleanup registers cleanup that closes the connection pool before dropping the database.
-// With KeepOnFailure, a failed test's database is kept for inspection instead.
-func registerCleanup(t testing.TB, db *testdb.TestDatabase) {
-	t.Cleanup(func() {
-		// Close the pool/connection if it implements io.Closer
-		if entity := db.Entity(); entity != nil {
-			if closer, ok := entity.(io.Closer); ok {
-				if err := closer.Close(); err != nil {
-					t.Logf("Warning: failed to close entity: %v", err)
-				}
-			}
-		}
-
-		if db.Config().KeepOnFailure && t.Failed() {
-			db.Keep()
-		}
-
-		// Drop database (TerminateConnections handles any remaining connections)
-		if err := db.Close(); err != nil {
-			t.Errorf("testdb cleanup failed: %v", err)
-		}
-	})
-}
+var (
+	_ testdb.TemplateProvider = (*PostgresProvider)(nil)
+	_ testdb.InspectCommander = (*PostgresProvider)(nil)
+)
 
 // InitializeTestDatabase creates a pgxpool.Pool for the test database.
 func (pi *PoolInitializer) InitializeTestDatabase(ctx context.Context, dsn string) (any, error) {
@@ -435,9 +409,8 @@ func Setup(t testing.TB, opts ...testdb.Option) *pgxpool.Pool {
 		t.Fatalf("postgres.Setup: %v", err)
 	}
 
-	runMigrationsIfConfigured(t, db, "postgres.Setup")
-
-	registerCleanup(t, db)
+	testdb.RunConfiguredMigrations(t, db, "postgres.Setup")
+	testdb.RegisterCleanup(t, db)
 
 	return db.Entity().(*pgxpool.Pool)
 }
@@ -516,9 +489,8 @@ func New(t testing.TB, initializer testdb.DBInitializer, opts ...testdb.Option) 
 		t.Fatalf("postgres.New: %v", err)
 	}
 
-	runMigrationsIfConfigured(t, db, "postgres.New")
-
-	registerCleanup(t, db)
+	testdb.RunConfiguredMigrations(t, db, "postgres.New")
+	testdb.RegisterCleanup(t, db)
 
 	return db
 }
