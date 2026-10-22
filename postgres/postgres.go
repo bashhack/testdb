@@ -316,11 +316,11 @@ func (p *PostgresProvider) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-// runMigrationsIfConfigured runs migrations if the database was configured with a migration directory.
+// runMigrationsIfConfigured runs the configured Migrator, if there is one.
 // It calls t.Fatalf if migrations fail, so this function does not return on error.
 func runMigrationsIfConfigured(t testing.TB, db *testdb.TestDatabase, callerName string) {
-	if db.Config().MigrationDir != "" {
-		if err := db.RunMigrations(); err != nil {
+	if db.Config().Migrator != nil {
+		if err := db.RunMigrations(testdb.ContextOf(t)); err != nil {
 			if closeErr := db.Close(); closeErr != nil {
 				t.Logf("Warning: failed to close database after migration error: %v", closeErr)
 			}
@@ -404,8 +404,7 @@ func (pi *PoolInitializer) InitializeTestDatabase(ctx context.Context, dsn strin
 //
 //	func TestUsers(t *testing.T) {
 //	    pool := postgres.Setup(t,
-//	        testdb.WithMigrations("./migrations"),
-//	        testdb.WithMigrationTool(testdb.MigrationToolTern))
+//	        testdb.WithMigrator(goose.Dir("./migrations")))
 //	    // Use pool for testing - NO defer pool.Close() needed!
 //	    // Cleanup happens automatically via t.Cleanup()
 //	}
@@ -467,8 +466,7 @@ func Setup(t testing.TB, opts ...testdb.Option) *pgxpool.Pool {
 //
 //	func TestAdvanced(t *testing.T) {
 //	    db := postgres.New(t, &GormInitializer{},
-//	        testdb.WithMigrations("./migrations"),
-//	        testdb.WithMigrationTool(testdb.MigrationToolGoose))
+//	        testdb.WithMigrator(goose.Dir("./migrations")))
 //	    gormDB := db.Entity().(*gorm.DB)
 //	    // Use gormDB for testing - NO defer needed, cleanup is automatic!
 //	}

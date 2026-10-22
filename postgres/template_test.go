@@ -511,117 +511,40 @@ func TestHashFiles(t *testing.T) {
 	}
 }
 
-func TestTemplateWithLoadMigrations(t *testing.T) {
+func TestTemplateWithSQLFiles(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	name := uniqueTemplateName(t, "test_template_sqlfiles")
 
-	tests := map[string]struct {
-		tool          testdb.MigrationTool
-		migrationDir  string
-		expectedTable string
-	}{
-		"Goose": {
-			tool:          testdb.MigrationToolGoose,
-			migrationDir:  "../testdata/postgres/migrations_goose",
-			expectedTable: "products",
-		},
-		"Tern": {
-			tool:          testdb.MigrationToolTern,
-			migrationDir:  "../testdata/postgres/migrations_tern",
-			expectedTable: "users",
-		},
-		"Migrate": {
-			tool:          testdb.MigrationToolMigrate,
-			migrationDir:  "../testdata/postgres/migrations_migrate",
-			expectedTable: "test_table",
-		},
+	tpl, err := postgres.EnsureTemplate(ctx, name,
+		postgres.SQLFiles("../testdata/postgres/schema"))
+	if err != nil {
+		t.Fatalf("EnsureTemplate with SQLFiles failed: %v", err)
 	}
+	t.Cleanup(func() { release(t, tpl) })
 
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			templateName := uniqueTemplateName(t, "test_template_"+strings.ToLower(name))
+	pool := postgres.Setup(t, tpl.Option())
 
-			tpl, err := postgres.EnsureTemplate(ctx, templateName,
-				postgres.LoadMigrations(tc.migrationDir, tc.tool))
-			if err != nil {
-				t.Fatalf("EnsureTemplate with LoadMigrations failed: %v", err)
-			}
-			t.Cleanup(func() { release(t, tpl) })
-
-			pool := postgres.Setup(t, testdb.WithTemplate(templateName))
-
-			var tableExists bool
-			err = pool.QueryRow(ctx, `
-				SELECT EXISTS (
-					SELECT FROM information_schema.tables
-					WHERE table_name = $1
-				)
-			`, tc.expectedTable).Scan(&tableExists)
-			if err != nil {
-				t.Fatalf("failed to check table existence: %v", err)
-			}
-			if !tableExists {
-				t.Fatalf("expected %s table from migrations to exist", tc.expectedTable)
-			}
-
-			switch tc.tool {
-			case testdb.MigrationToolGoose:
-				var productID int
-				err = pool.QueryRow(ctx,
-					"INSERT INTO products (name, price) VALUES ($1, $2) RETURNING id",
-					"Test Product", 29.99).Scan(&productID)
-				if err != nil {
-					t.Fatalf("failed to insert into products: %v", err)
-				}
-				var name string
-				var price float64
-				err = pool.QueryRow(ctx,
-					"SELECT name, price FROM products WHERE id = $1", productID).Scan(&name, &price)
-				if err != nil {
-					t.Fatalf("failed to query products: %v", err)
-				}
-				if name != "Test Product" || price != 29.99 {
-					t.Errorf("expected ('Test Product', 29.99), got (%q, %f)", name, price)
-				}
-
-			case testdb.MigrationToolTern:
-				var userID int
-				err = pool.QueryRow(ctx,
-					"INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id",
-					"test@example.com", "Test User").Scan(&userID)
-				if err != nil {
-					t.Fatalf("failed to insert into users: %v", err)
-				}
-				var email, name string
-				err = pool.QueryRow(ctx,
-					"SELECT email, name FROM users WHERE id = $1", userID).Scan(&email, &name)
-				if err != nil {
-					t.Fatalf("failed to query users: %v", err)
-				}
-				if email != "test@example.com" || name != "Test User" {
-					t.Errorf("expected ('test@example.com', 'Test User'), got (%q, %q)", email, name)
-				}
-
-			case testdb.MigrationToolMigrate:
-				var testID int
-				err = pool.QueryRow(ctx,
-					"INSERT INTO test_table (name) VALUES ($1) RETURNING id",
-					"Test Name").Scan(&testID)
-				if err != nil {
-					t.Fatalf("failed to insert into test_table: %v", err)
-				}
-				var name string
-				err = pool.QueryRow(ctx,
-					"SELECT name FROM test_table WHERE id = $1", testID).Scan(&name)
-				if err != nil {
-					t.Fatalf("failed to query test_table: %v", err)
-				}
-				if name != "Test Name" {
-					t.Errorf("expected 'Test Name', got %q", name)
-				}
-			}
-		})
+	// The clone carries the whole schema and is writable
+	var productID int
+	err = pool.QueryRow(ctx,
+		"INSERT INTO products (name, price) VALUES ($1, $2) RETURNING id",
+		"Test Product", 29.99).Scan(&productID)
+	if err != nil {
+		t.Fatalf("failed to insert into products: %v", err)
+	}
+	var userID int
+	err = pool.QueryRow(ctx,
+		"INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id",
+		"test@example.com", "Test User").Scan(&userID)
+	if err != nil {
+		t.Fatalf("failed to insert into users: %v", err)
+	}
+	var testID int
+	err = pool.QueryRow(ctx,
+		"INSERT INTO test_table (name) VALUES ($1) RETURNING id", "Test Name").Scan(&testID)
+	if err != nil {
+		t.Fatalf("failed to insert into test_table: %v", err)
 	}
 }
 
@@ -632,7 +555,7 @@ func TestTemplateCompose(t *testing.T) {
 
 	tpl, err := postgres.EnsureTemplate(ctx, name,
 		postgres.Compose(
-			postgres.LoadMigrations("../testdata/postgres/migrations_goose", testdb.MigrationToolGoose),
+			postgres.SQLFiles("../testdata/postgres/schema"),
 			nil, // skipped
 			postgres.LoadSQLFile("../testdata/postgres/fixtures/additional_data.sql"),
 		))

@@ -18,8 +18,7 @@ func Example_new() {
 	initializer := &postgres.PoolInitializer{}
 
 	db, err := testdb.New(t, provider, initializer,
-		testdb.WithMigrations("./testdata/postgres/migrations_migrate"),
-		testdb.WithMigrationTool(testdb.MigrationToolMigrate),
+		testdb.WithMigrator(postgres.SQLFiles("./testdata/postgres/schema")),
 		testdb.WithDBPrefix("myapp_test"),
 	)
 	if err != nil {
@@ -35,7 +34,7 @@ func Example_new() {
 	// DSN is always available
 	fmt.Println("Database created successfully")
 
-	if err := db.RunMigrations(); err != nil {
+	if err := db.RunMigrations(context.Background()); err != nil {
 		fmt.Printf("Migration error: %v\n", err)
 		return
 	}
@@ -55,8 +54,7 @@ func Example_dsnOnly() {
 
 	// Pass nil initializer to skip connection initialization
 	db, err := testdb.New(t, provider, nil,
-		testdb.WithMigrations("./testdata/postgres/migrations_migrate"),
-		testdb.WithMigrationTool(testdb.MigrationToolMigrate),
+		testdb.WithMigrator(postgres.SQLFiles("./testdata/postgres/schema")),
 	)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -86,8 +84,7 @@ func Example_customInitializer() {
 	initializer := &exampleInitializer{}
 
 	db, err := testdb.New(t, provider, initializer,
-		testdb.WithMigrations("./testdata/postgres/migrations_migrate"),
-		testdb.WithMigrationTool(testdb.MigrationToolMigrate),
+		testdb.WithMigrator(postgres.SQLFiles("./testdata/postgres/schema")),
 	)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

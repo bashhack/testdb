@@ -9,13 +9,13 @@
 //
 //	import (
 //	    "github.com/bashhack/testdb"
+//	    "github.com/bashhack/testdb/migrate/goose"
 //	    "github.com/bashhack/testdb/postgres"
 //	)
 //
 //	func TestUsers(t *testing.T) {
 //	    pool := postgres.Setup(t,
-//	        testdb.WithMigrations("./migrations"),
-//	        testdb.WithMigrationTool(testdb.MigrationToolTern))
+//	        testdb.WithMigrator(goose.Dir("./migrations")))
 //	    // Use pool for testing...
 //	    // Cleanup is automatic via t.Cleanup()
 //	}
@@ -47,6 +47,7 @@ package testdb
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -229,6 +230,18 @@ type testingHelper interface {
 	Helper()
 }
 
+// ContextOf returns t.Context(), which is cancelled when the test ends, so
+// database setup and migrations stop when a test times out. A zero
+// testing.T, as runnable examples use, has no context; then it returns
+// context.Background(). Database-specific packages use it when calling
+// RunMigrations on a test's behalf.
+func ContextOf(t testing.TB) context.Context {
+	if ctx := t.Context(); ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
 // New creates a test database using the provided provider and optional initializer.
 //
 // This is the low-level API for creating test databases. Most users should use
@@ -252,8 +265,7 @@ type testingHelper interface {
 //	provider := &postgres.PostgresProvider{}
 //	initializer := &postgres.PoolInitializer{}
 //	db, err := testdb.New(t, provider, initializer,
-//	    testdb.WithMigrations("./migrations"),
-//	    testdb.WithMigrationTool(testdb.MigrationToolTern),
+//	    testdb.WithMigrator(goose.Dir("./migrations")),
 //	)
 //	if err != nil {
 //	    t.Fatal(err)
@@ -261,6 +273,8 @@ type testingHelper interface {
 //	defer db.Close()
 //
 //	pool := db.Entity().(*pgxpool.Pool)
+//
+// Creation uses t.Context(), so it is cancelled when the test times out.
 func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Option) (*TestDatabase, error) {
 	t.Helper()
 
@@ -283,7 +297,10 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 		}
 	}
 
-	ctx := context.Background()
+	ctx := ContextOf(t)
+	// t.Context() is already cancelled by the time t.Cleanup functions run,
+	// so cleanup must not use it.
+	cleanupCtx := context.WithoutCancel(ctx)
 	if err := provider.Initialize(ctx, cfg); err != nil {
 		return nil, &Error{
 			Op:  "provider.Initialize",
@@ -326,10 +343,9 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 
 	testDSN, err := provider.BuildDSN(dbName)
 	if err != nil {
-		_ = provider.DropDatabase(ctx, dbName) // Best effort cleanup
 		return nil, &Error{
 			Op:  "provider.BuildDSN",
-			Err: err,
+			Err: errors.Join(err, provider.DropDatabase(cleanupCtx, dbName)),
 		}
 	}
 
@@ -342,21 +358,21 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 	}
 
 	td.cleanup = func() error {
-		if err := provider.TerminateConnections(ctx, dbName); err != nil {
+		if err := provider.TerminateConnections(cleanupCtx, dbName); err != nil {
 			return &Error{
 				Op:  "provider.TerminateConnections",
 				Err: err,
 			}
 		}
 
-		if err := provider.DropDatabase(ctx, dbName); err != nil {
+		if err := provider.DropDatabase(cleanupCtx, dbName); err != nil {
 			return &Error{
 				Op:  "provider.DropDatabase",
 				Err: err,
 			}
 		}
 
-		if err := provider.Cleanup(ctx); err != nil {
+		if err := provider.Cleanup(cleanupCtx); err != nil {
 			return &Error{
 				Op:  "provider.Cleanup",
 				Err: err,
@@ -372,10 +388,9 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 	if initializer != nil {
 		entity, err := initializer.InitializeTestDatabase(ctx, td.dsn)
 		if err != nil {
-			_ = td.Close() // Best effort cleanup
 			return nil, &Error{
 				Op:  "initializer.InitializeTestDatabase",
-				Err: err,
+				Err: errors.Join(err, td.Close()),
 			}
 		}
 		td.entity = entity
@@ -413,58 +428,6 @@ func (td *TestDatabase) Entity() any {
 func (td *TestDatabase) logf(format string, args ...any) {
 	if td.config.Verbose {
 		td.t.Logf(format, args...)
-	}
-}
-
-// RunMigrations executes database migrations using the configured migration tool.
-// The migration directory and tool must both be set via WithMigrations() and
-// WithMigrationTool() options.
-//
-// Supported migration tools:
-//   - Tern (github.com/jackc/tern) - PostgreSQL only
-//   - Goose (github.com/pressly/goose) - PostgreSQL, MySQL, SQLite
-//   - golang-migrate (github.com/golang-migrate/migrate) - PostgreSQL, MySQL, SQLite, MongoDB, and more
-//
-// The migration tool binary must be available in PATH or specified via
-// WithMigrationToolPath() option.
-//
-// Returns an error if migrations fail. The database is NOT automatically
-// cleaned up on migration failure - call Close() manually if needed.
-//
-// Example:
-//
-//	db, err := testdb.New(t, provider, initializer,
-//	    testdb.WithMigrations("./migrations"),
-//	    testdb.WithMigrationTool(testdb.MigrationToolTern),
-//	)
-//	if err != nil {
-//	    t.Fatal(err)
-//	}
-//	defer db.Close()
-//
-//	if err := db.RunMigrations(); err != nil {
-//	    t.Fatalf("migrations failed: %v", err)
-//	}
-func (td *TestDatabase) RunMigrations() error {
-	if td.config.MigrationDir == "" {
-		return &Error{
-			Op:  "RunMigrations",
-			Err: ErrNoMigrationDir,
-		}
-	}
-
-	switch td.config.MigrationTool {
-	case MigrationToolTern:
-		return td.runTernMigrations()
-	case MigrationToolGoose:
-		return td.runGooseMigrations()
-	case MigrationToolMigrate:
-		return td.runMigrateMigrations()
-	default:
-		return &Error{
-			Op:  "RunMigrations",
-			Err: ErrUnknownMigrationTool,
-		}
 	}
 }
 

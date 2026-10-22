@@ -19,11 +19,10 @@ import (
 func Example_setup() {
 	t := &testing.T{}
 
-	// Create isolated test database with migrations
+	// Create isolated test database with the schema applied
 	// Cleanup is automatic via t.Cleanup()
 	pool := postgres.Setup(t,
-		testdb.WithMigrations("../testdata/postgres/migrations_migrate"),
-		testdb.WithMigrationTool(testdb.MigrationToolMigrate))
+		testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")))
 
 	_, err := pool.Exec(context.Background(),
 		"INSERT INTO test_table (name) VALUES ($1)", "test")
@@ -48,8 +47,7 @@ func Example_parallel() {
 		t.Parallel()
 
 		pool := postgres.Setup(t,
-			testdb.WithMigrations("../testdata/postgres/migrations_migrate"),
-			testdb.WithMigrationTool(testdb.MigrationToolMigrate))
+			testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")))
 
 		_, err := pool.Exec(context.Background(),
 			"INSERT INTO users (email) VALUES ($1)", "user1@example.com")
@@ -64,8 +62,7 @@ func Example_parallel() {
 		t.Parallel()
 
 		pool := postgres.Setup(t,
-			testdb.WithMigrations("../testdata/postgres/migrations_migrate"),
-			testdb.WithMigrationTool(testdb.MigrationToolMigrate))
+			testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")))
 
 		_, err := pool.Exec(context.Background(),
 			"INSERT INTO users (email) VALUES ($1)", "user2@example.com")
@@ -85,8 +82,7 @@ func Example_configuration() {
 	t := &testing.T{}
 
 	pool := postgres.Setup(t,
-		testdb.WithMigrations("../testdata/postgres/migrations_migrate"),
-		testdb.WithMigrationTool(testdb.MigrationToolMigrate),
+		testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")),
 		testdb.WithDBPrefix("myapp_test"),
 	)
 
@@ -109,8 +105,7 @@ func Example_helperFunction() {
 	setupDB := func(t *testing.T) *pgxpool.Pool {
 		t.Helper()
 		return postgres.Setup(t,
-			testdb.WithMigrations("../testdata/postgres/migrations_migrate"),
-			testdb.WithMigrationTool(testdb.MigrationToolMigrate),
+			testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")),
 			testdb.WithDBPrefix("myapp_test"),
 		)
 	}
@@ -337,8 +332,7 @@ func Example_multipleOptions() {
 
 	pool := postgres.Setup(t,
 		testdb.WithDBPrefix("test"),
-		testdb.WithMigrations("../testdata/postgres/migrations_migrate"),
-		testdb.WithMigrationTool(testdb.MigrationToolMigrate),
+		testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")),
 	)
 
 	// Verify database exists and migrations ran
@@ -378,16 +372,17 @@ func Example_multipleOptions() {
 	// Migrations ran and tables exist
 }
 
-// Example_migrationsWithMigrate demonstrates using golang-migrate.
-func Example_migrationsWithMigrate() {
+// Example_sqlFiles applies a directory of plain .sql files to each test
+// database, no migration tool required. For goose, tern or golang-migrate,
+// use the adapter modules under github.com/bashhack/testdb/migrate.
+func Example_sqlFiles() {
 	t := &testing.T{}
 
 	pool := postgres.Setup(t,
-		testdb.WithMigrations("../testdata/postgres/migrations_migrate"),
-		testdb.WithMigrationTool(testdb.MigrationToolMigrate),
+		testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")),
 	)
 
-	// Verify migration created the table
+	// Verify the schema is in place
 	var exists bool
 	err := pool.QueryRow(context.Background(), `
 		SELECT EXISTS (
@@ -414,84 +409,43 @@ func Example_migrationsWithMigrate() {
 		return
 	}
 
-	fmt.Println("Migration with golang-migrate successful")
+	fmt.Println("Schema applied from SQL files")
 	fmt.Println("Table exists and data inserted")
 
 	// Output:
-	// Migration with golang-migrate successful
+	// Schema applied from SQL files
 	// Table exists and data inserted
 }
 
-// Example_migrationsWithGoose demonstrates using goose.
-func Example_migrationsWithGoose() {
+// Example_customMigrator shows that any function taking a context and a DSN
+// can prepare the database: here, a few statements run directly.
+func Example_customMigrator() {
 	t := &testing.T{}
 
-	pool := postgres.Setup(t,
-		testdb.WithMigrations("../testdata/postgres/migrations_goose"),
-		testdb.WithMigrationTool(testdb.MigrationToolGoose),
-	)
-
-	// Verify migration created the products table
-	var exists bool
-	err := pool.QueryRow(context.Background(), `
-		SELECT EXISTS (
-			SELECT FROM information_schema.tables
-			WHERE table_name = 'products'
-		)
-	`).Scan(&exists)
-
-	if err != nil {
-		fmt.Printf("Failed to check table: %v\n", err)
-		return
+	createSchema := func(ctx context.Context, dsn string) error {
+		conn, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		_, err = conn.Exec(ctx, "CREATE TABLE notes (id SERIAL PRIMARY KEY, body TEXT NOT NULL)")
+		return err
 	}
-
-	if !exists {
-		fmt.Println("Expected products table to exist after migrations")
-		return
-	}
-
-	fmt.Println("Migration with goose successful")
-	fmt.Println("Products table exists")
-
-	// Output:
-	// Migration with goose successful
-	// Products table exists
-}
-
-// Example_migrationsWithTern demonstrates using tern.
-func Example_migrationsWithTern() {
-	t := &testing.T{}
 
 	pool := postgres.Setup(t,
-		testdb.WithMigrations("../testdata/postgres/migrations_tern"),
-		testdb.WithMigrationTool(testdb.MigrationToolTern),
+		testdb.WithMigrator(testdb.MigratorFunc(createSchema)),
 	)
 
-	// Verify migration created the users table
-	var exists bool
-	err := pool.QueryRow(context.Background(), `
-		SELECT EXISTS (
-			SELECT FROM information_schema.tables
-			WHERE table_name = 'users'
-		)
-	`).Scan(&exists)
-
-	if err != nil {
-		fmt.Printf("Failed to check table: %v\n", err)
+	if _, err := pool.Exec(context.Background(),
+		"INSERT INTO notes (body) VALUES ($1)", "hello"); err != nil {
+		fmt.Printf("Failed to insert: %v\n", err)
 		return
 	}
 
-	if !exists {
-		fmt.Println("Expected users table to exist after migrations")
-		return
-	}
-
-	fmt.Println("Migration with tern successful")
-	fmt.Println("Users table exists")
+	fmt.Println("Custom migrator prepared the database")
 
 	// Output:
-	// Migration with tern successful
-	// Users table exists
+	// Custom migrator prepared the database
 }
 
 // Example_parallelExecution demonstrates running tests in parallel with isolated databases.
@@ -555,9 +509,11 @@ func Example_parallelExecution() {
 func Example_templateWithMigrations() {
 	ctx := context.Background()
 
-	// In TestMain: ensure the template once, with migrations applied
+	// In TestMain: ensure the template once, with the schema applied.
+	// A migration-tool adapter's Migrate method works here too, for
+	// example goose.Dir("./migrations").Migrate.
 	tpl, err := postgres.EnsureTemplate(ctx, "with_schema",
-		postgres.LoadMigrations("../testdata/postgres/migrations_goose", testdb.MigrationToolGoose))
+		postgres.SQLFiles("../testdata/postgres/schema"))
 	if err != nil {
 		fmt.Printf("Error creating template: %v\n", err)
 		return
@@ -603,8 +559,8 @@ func Example_templateComposite() {
 
 	// In TestMain: ensure a template with both migrations and fixtures
 	setupFunc := func(ctx context.Context, dsn string) error {
-		// First run migrations to create schema
-		if err := postgres.LoadMigrations("../testdata/postgres/migrations_goose", testdb.MigrationToolGoose)(ctx, dsn); err != nil {
+		// First apply the schema (or run your migration tool's adapter)
+		if err := postgres.SQLFiles("../testdata/postgres/schema")(ctx, dsn); err != nil {
 			return err
 		}
 		// Then load fixture data

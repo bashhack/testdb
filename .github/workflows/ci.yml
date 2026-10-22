@@ -58,29 +58,28 @@ jobs:
       - name: Install tools
         run: |
           command -v staticcheck || go install honnef.co/go/tools/cmd/staticcheck@latest
-          command -v tern || go install github.com/jackc/tern/v2@latest
-          command -v goose || go install github.com/pressly/goose/v3/cmd/goose@latest
-          command -v migrate || go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a
         with:
           version: latest
+          # The adapters are separate modules; ./... alone covers only the root
+          args: ./... ./migrate/goose/... ./migrate/tern/... ./migrate/golangmigrate/...
 
       - name: Run linters
         run: make lint
 
       - name: Run unit tests and generate coverage
         run: |
-          GOMAXPROCS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4) go test -v ./...
-          go test -coverprofile=coverage.txt ./...
+          GOMAXPROCS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4) go test -v github.com/bashhack/testdb/...
+          go test -coverprofile=coverage.txt github.com/bashhack/testdb/...
           go tool cover -html=coverage.txt -o coverage.html
 
       - name: Run tests with race detection
         run: |
           CORES=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
           RACE_CORES=$([ $CORES -gt 4 ] && echo 4 || echo $CORES)
-          GOMAXPROCS=$RACE_CORES go test -race ./...
+          GOMAXPROCS=$RACE_CORES go test -race github.com/bashhack/testdb/...
 
       - name: Upload coverage report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

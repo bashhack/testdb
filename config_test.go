@@ -2,6 +2,7 @@ package testdb
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -10,28 +11,21 @@ func TestValidateConfig(t *testing.T) {
 		cfg     Config
 		wantErr error
 	}{
-		"both set": {
-			cfg: Config{
-				MigrationDir:  "./migrations",
-				MigrationTool: MigrationToolTern,
-			},
+		"defaults": {
+			cfg:     DefaultConfig(),
 			wantErr: nil,
 		},
-		"neither set": {
+		"empty": {
 			cfg:     Config{},
 			wantErr: nil,
 		},
-		"dir without tool": {
-			cfg: Config{
-				MigrationDir: "./migrations",
-			},
-			wantErr: ErrMigrationDirWithoutTool,
+		"prefix at the limit": {
+			cfg:     Config{DBPrefix: strings.Repeat("p", MaxDBPrefixLength)},
+			wantErr: nil,
 		},
-		"tool without dir": {
-			cfg: Config{
-				MigrationTool: MigrationToolTern,
-			},
-			wantErr: ErrMigrationToolWithoutDir,
+		"prefix too long": {
+			cfg:     Config{DBPrefix: strings.Repeat("p", MaxDBPrefixLength+1)},
+			wantErr: ErrPrefixTooLong,
 		},
 	}
 
@@ -45,75 +39,24 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-func TestNewWithMigrationDirWithoutTool(t *testing.T) {
+func TestNewRejectsInvalidConfig(t *testing.T) {
 	provider := &mockProvider{}
 
 	_, err := New(t, provider, nil,
-		WithMigrations("./migrations"),
+		WithDBPrefix(strings.Repeat("p", MaxDBPrefixLength+1)),
 	)
-
 	if err == nil {
-		t.Fatal("Expected error when migration directory specified without tool")
+		t.Fatal("Expected error for a prefix over the limit")
 	}
 
 	var testErr *Error
 	if !errors.As(err, &testErr) {
 		t.Fatalf("Expected *Error, got %T", err)
 	}
-
-	if !errors.Is(testErr.Err, ErrMigrationDirWithoutTool) {
-		t.Errorf("Expected ErrMigrationDirWithoutTool, got %v", testErr.Err)
+	if testErr.Op != "testdb.New" {
+		t.Errorf("Expected Op testdb.New, got %q", testErr.Op)
 	}
-}
-
-func TestNewWithMigrationToolWithoutDir(t *testing.T) {
-	provider := &mockProvider{}
-
-	_, err := New(t, provider, nil,
-		WithMigrationTool(MigrationToolTern),
-	)
-
-	if err == nil {
-		t.Fatal("Expected error when migration tool specified without directory")
-	}
-
-	var testErr *Error
-	if !errors.As(err, &testErr) {
-		t.Fatalf("Expected *Error, got %T", err)
-	}
-
-	if !errors.Is(testErr.Err, ErrMigrationToolWithoutDir) {
-		t.Errorf("Expected ErrMigrationToolWithoutDir, got %v", testErr.Err)
-	}
-}
-
-func TestNewWithBothMigrationOptions(t *testing.T) {
-	provider := &mockProvider{}
-
-	db, err := New(t, provider, nil,
-		WithMigrations("./migrations"),
-		WithMigrationTool(MigrationToolTern),
-	)
-
-	if err != nil {
-		t.Fatalf("Expected no error, got %v", err)
-	}
-
-	if db == nil {
-		t.Fatal("Expected database to be created")
-	}
-
-	defer func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("Failed to close database: %v", err)
-		}
-	}()
-
-	if db.Config().MigrationDir != "./migrations" {
-		t.Errorf("Expected MigrationDir './migrations', got %s", db.Config().MigrationDir)
-	}
-
-	if db.Config().MigrationTool != MigrationToolTern {
-		t.Errorf("Expected MigrationTool 'tern', got %s", db.Config().MigrationTool)
+	if !errors.Is(testErr.Err, ErrPrefixTooLong) {
+		t.Errorf("Expected ErrPrefixTooLong, got %v", testErr.Err)
 	}
 }

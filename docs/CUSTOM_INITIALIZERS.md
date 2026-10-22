@@ -64,8 +64,7 @@ func (g *GormInitializer) InitializeTestDatabase(ctx context.Context, dsn string
 ```go
 func TestGetUser(t *testing.T) {
     db := postgres.New(t, &GormInitializer{},
-        testdb.WithMigrations("./migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolGoose))
+        testdb.WithMigrator(goose.Dir("./migrations")))
 
     gormDB := db.Entity().(*gorm.DB)
 
@@ -123,8 +122,7 @@ func (s *SqlxInitializer) InitializeTestDatabase(ctx context.Context, dsn string
 ```go
 func TestListUsers(t *testing.T) {
     db := postgres.New(t, &SqlxInitializer{},
-        testdb.WithMigrations("./migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolMigrate))
+        testdb.WithMigrator(golangmigrate.Dir("./migrations")))
 
     sqlxDB := db.Entity().(*sqlx.DB)
 
@@ -191,8 +189,7 @@ func (a *AppDBInitializer) InitializeTestDatabase(ctx context.Context, dsn strin
 ```go
 func TestGetActiveUsers(t *testing.T) {
     db := postgres.New(t, &AppDBInitializer{Timeout: 10 * time.Second},
-        testdb.WithMigrations("./migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolTern))
+        testdb.WithMigrator(tern.Dir("./migrations")))
 
     appDB := db.Entity().(*AppDB)
 
@@ -340,8 +337,7 @@ func SetupAppDB(t testing.TB) *AppDB {
     t.Helper()
 
     db := postgres.New(t, &AppDBInitializer{},
-        testdb.WithMigrations("../migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolTern))
+        testdb.WithMigrator(tern.Dir("../migrations")))
 
     return db.Entity().(*AppDB)
 }
@@ -361,8 +357,7 @@ If you're using standard pgx/pgxpool with default settings, just use `postgres.S
 func TestSimple(t *testing.T) {
     // This is simpler and sufficient for standard pgx usage
     pool := postgres.Setup(t,
-        testdb.WithMigrations("./migrations"),
-        testdb.WithMigrationTool(testdb.MigrationToolTern))
+        testdb.WithMigrator(tern.Dir("./migrations")))
 
     // Use pool
 }
