@@ -3,7 +3,6 @@ package testdb_test
 import (
 	"context"
 	"fmt"
-	"testing"
 
 	"github.com/bashhack/testdb"
 	"github.com/bashhack/testdb/postgres"
@@ -12,7 +11,8 @@ import (
 // Example_new demonstrates using testdb.New with a custom initializer
 // for full control over database initialization.
 func Example_new() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	provider := &postgres.PostgresProvider{}
 	initializer := &postgres.PoolInitializer{}
@@ -48,7 +48,8 @@ func Example_new() {
 // Example_dsnOnly demonstrates using testdb to get just a DSN
 // without automatic connection initialization.
 func Example_dsnOnly() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	provider := &postgres.PostgresProvider{}
 
@@ -78,7 +79,8 @@ func Example_dsnOnly() {
 // Example_customInitializer shows implementing a custom initializer
 // for integration with ORMs or custom database types.
 func Example_customInitializer() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	provider := &postgres.PostgresProvider{}
 	initializer := &exampleInitializer{}
