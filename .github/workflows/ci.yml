@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        go-version: ['1.24']
+        go-version: ['1.27']
 
     services:
       postgres:
@@ -63,7 +63,7 @@ jobs:
           command -v migrate || go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@971e284b6050e8a5849b72094c50ab08da042db8
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a
         with:
           version: latest
 
