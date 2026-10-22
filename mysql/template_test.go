@@ -280,7 +280,10 @@ func TestTemplateReadyPool(t *testing.T) {
 		}
 	})
 
-	waitFor(t, "the pool to fill", func() bool { return tpl.Ready() == 2 })
+	// Warm-up is on by default: the pool is full when EnsureTemplate returns
+	if n := tpl.Ready(); n != 2 {
+		t.Fatalf("Ready() = %d right after EnsureTemplate, want 2 (warm-up)", n)
+	}
 
 	// A test takes a prepared database: the name carries the pool's prefix,
 	// the clone is complete, and the pool refills
@@ -308,6 +311,62 @@ func TestTemplateReadyPool(t *testing.T) {
 		}
 	}
 	t.Logf("5 rapid takes: %d served on demand, %d from the pool", onDemand, 5-onDemand)
+}
+
+func TestTemplateReadyWarmupOff(t *testing.T) {
+	requireMySQL(t)
+	ctx := context.Background()
+	name := uniqueTemplateName(t, "tpl_nowarm")
+
+	start := time.Now()
+	tpl, err := mysql.EnsureTemplate(ctx, name, mysql.SQLFiles(schemaDir),
+		mysql.WithReadyDatabases(2), mysql.WithReadyWarmup(false), mysql.WithReadyPrefix("nowarm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { release(t, tpl) })
+	t.Logf("EnsureTemplate without warm-up returned in %s with %d ready", time.Since(start), tpl.Ready())
+
+	// The pool fills alongside, and tests work meanwhile
+	db := mysql.Setup(t, tpl.Option())
+	if !tableExists(t, db, "users") {
+		t.Fatal("clone lacks the schema")
+	}
+	waitFor(t, "the pool to fill in the background", func() bool { return tpl.Ready() == 2 })
+}
+
+func TestTemplateWarmupCancelled(t *testing.T) {
+	requireMySQL(t)
+	admin := adminDB(t)
+	name := uniqueTemplateName(t, "tpl_warmcancel")
+
+	// A warm-up one worker cannot finish in time: 256 clones against a
+	// deadline a few clones long. Whether the deadline lands during the
+	// build or during the warm-up, the outcome must be the same.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	tpl, err := mysql.EnsureTemplate(ctx, name, mysql.SQLFiles(schemaDir),
+		mysql.WithReadyDatabases(256), mysql.WithReadyWorkers(1), mysql.WithReadyPrefix("warmcancel"))
+	if err == nil {
+		release(t, tpl)
+		t.Fatal("256 clones in 500 ms: the warm-up should not have finished")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected a deadline error, got %v", err)
+	}
+	// Nothing was left behind: the template and its prepared databases were
+	// released on the way out
+	if databaseExists(t, admin, name) {
+		t.Errorf("template %s left behind after a cancelled warm-up", name)
+	}
+	var leftovers int
+	if err := admin.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE 'warmcancel\\_%'").Scan(&leftovers); err != nil {
+		t.Fatal(err)
+	}
+	if leftovers != 0 {
+		t.Errorf("%d prepared databases left behind after a cancelled warm-up", leftovers)
+	}
 }
 
 func TestTemplateNameValidation(t *testing.T) {
