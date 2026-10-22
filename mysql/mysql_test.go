@@ -258,10 +258,14 @@ func TestKeepOnFailureKeepsDatabaseAndSaysHowToOpenIt(t *testing.T) {
 	}
 }
 
-func TestWithTemplateIsRefused(t *testing.T) {
-	_, err := testdb.New(t, &mysql.Provider{}, nil, testdb.WithTemplate("anything"))
-	if !errors.Is(err, testdb.ErrTemplatesNotSupported) {
-		t.Fatalf("expected ErrTemplatesNotSupported, got %v", err)
+func TestWithUnknownTemplate(t *testing.T) {
+	requireMySQL(t)
+	_, err := testdb.New(t, &mysql.Provider{}, nil, testdb.WithTemplate("no_such_template"))
+	if err == nil || !strings.Contains(err.Error(), `template database "no_such_template" does not exist (create it with mysql.EnsureTemplate)`) {
+		t.Fatalf("expected a does-not-exist error naming EnsureTemplate, got %v", err)
+	}
+	if errors.Is(err, testdb.ErrTemplatesNotSupported) {
+		t.Fatal("MySQL supports templates; the error must not say otherwise")
 	}
 }
 

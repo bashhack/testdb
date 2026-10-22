@@ -3,7 +3,6 @@ package mysql_test
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -27,17 +26,6 @@ func release(t *testing.T, tpl *mysql.Template) {
 	if err := tpl.Release(context.Background()); err != nil {
 		t.Errorf("Release: %v", err)
 	}
-}
-
-// readyCount is how many prepared databases a template has recorded.
-func readyCount(t *testing.T, admin *sql.DB, template string) int {
-	t.Helper()
-	var n int
-	err := admin.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM `"+template+"`.`_testdb_ready`").Scan(&n)
-	if err != nil {
-		t.Fatalf("count prepared databases: %v", err)
-	}
-	return n
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -292,7 +280,7 @@ func TestTemplateReadyPool(t *testing.T) {
 		}
 	})
 
-	waitFor(t, "the pool to fill", func() bool { return readyCount(t, admin, name) == 2 })
+	waitFor(t, "the pool to fill", func() bool { return tpl.Ready() == 2 })
 
 	// A test takes a prepared database: the name carries the pool's prefix,
 	// the clone is complete, and the pool refills
@@ -304,7 +292,7 @@ func TestTemplateReadyPool(t *testing.T) {
 	if !tableExists(t, db, "users") {
 		t.Error("prepared database lacks the schema")
 	}
-	waitFor(t, "the pool to refill", func() bool { return readyCount(t, admin, name) == 2 })
+	waitFor(t, "the pool to refill", func() bool { return tpl.Ready() == 2 })
 
 	// Taking faster than the pool refills never waits: whatever is not
 	// ready is cloned on demand, under a regular test name. Every database
