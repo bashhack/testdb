@@ -77,21 +77,26 @@ func (m *Migrator) Migrate(ctx context.Context, dsn string) (err error) {
 	// migration it is on.
 	done := make(chan error, 1)
 	go func() { done <- mg.Up() }()
+	var upErr error
 	select {
-	case err = <-done:
+	case upErr = <-done:
 	case <-ctx.Done():
 		select {
 		case mg.GracefulStop <- true:
 		default:
 		}
-		<-done
-		return ctx.Err()
+		// Wait for Up to stop, and report anything it ran into on the way
+		upErr = <-done
+		if errors.Is(upErr, migrate.ErrNoChange) {
+			upErr = nil
+		}
+		return errors.Join(ctx.Err(), upErr)
 	}
-	if errors.Is(err, migrate.ErrNoChange) {
+	if errors.Is(upErr, migrate.ErrNoChange) {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("golangmigrate: up: %w", err)
+	if upErr != nil {
+		return fmt.Errorf("golangmigrate: up: %w", upErr)
 	}
 	return nil
 }
