@@ -17,7 +17,8 @@ import (
 // Example_setup demonstrates basic usage of postgres.Setup for creating
 // isolated test databases with automatic cleanup.
 func Example_setup() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	// Create isolated test database with the schema applied
 	// Cleanup is automatic via t.Cleanup()
@@ -79,7 +80,8 @@ func Example_parallel() {
 
 // Example_configuration demonstrates configuration options.
 func Example_configuration() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	pool := postgres.Setup(t,
 		testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")),
@@ -102,7 +104,7 @@ func Example_configuration() {
 // Example_helperFunction demonstrates the helper function pattern for
 // consistent test setup.
 func Example_helperFunction() {
-	setupDB := func(t *testing.T) *pgxpool.Pool {
+	setupDB := func(t testing.TB) *pgxpool.Pool {
 		t.Helper()
 		return postgres.Setup(t,
 			testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")),
@@ -110,7 +112,8 @@ func Example_helperFunction() {
 		)
 	}
 
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 	pool := setupDB(t)
 
 	if err := pool.Ping(context.Background()); err != nil {
@@ -133,7 +136,8 @@ func (g *GormExampleInitializer) InitializeTestDatabase(ctx context.Context, dsn
 
 // Example_gorm demonstrates using postgres.New() with GORM for custom database initialization.
 func Example_gorm() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	// Create test database with GORM initializer
 	// postgres.New() is used instead of postgres.Setup() when you need custom initialization
@@ -179,7 +183,8 @@ func Example_gorm() {
 
 // Example_setupVsNew demonstrates when to use Setup() vs New().
 func Example_setupVsNew() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	// Use Setup() when working with pgx/pgxpool directly
 	// Returns *pgxpool.Pool - simplest API
@@ -222,7 +227,8 @@ func Example_setupVsNew() {
 //
 // For PostgreSQL-specific features, use PoolInitializer or Setup() instead.
 func Example_sqlDB() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	// Create test database with sql.DB
 	db := postgres.New(t, &postgres.SqlDbInitializer{})
@@ -276,7 +282,8 @@ func Example_sqlDB() {
 
 // Example_basicUsage demonstrates creating an isolated test database.
 func Example_basicUsage() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	// Create isolated test database
 	pool := postgres.Setup(t)
@@ -298,7 +305,8 @@ func Example_basicUsage() {
 
 // Example_customPrefix demonstrates using a custom database name prefix.
 func Example_customPrefix() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	pool := postgres.Setup(t,
 		testdb.WithDBPrefix("myapp"),
@@ -328,7 +336,8 @@ func Example_customPrefix() {
 
 // Example_multipleOptions demonstrates combining multiple configuration options.
 func Example_multipleOptions() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	pool := postgres.Setup(t,
 		testdb.WithDBPrefix("test"),
@@ -376,7 +385,8 @@ func Example_multipleOptions() {
 // database, no migration tool required. For goose, tern or golang-migrate,
 // use the adapter modules under github.com/bashhack/testdb/migrate.
 func Example_sqlFiles() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	pool := postgres.Setup(t,
 		testdb.WithMigrator(postgres.SQLFiles("../testdata/postgres/schema")),
@@ -420,7 +430,8 @@ func Example_sqlFiles() {
 // Example_customMigrator shows that any function taking a context and a DSN
 // can prepare the database: here, a few statements run directly.
 func Example_customMigrator() {
-	t := &testing.T{}
+	t := newExampleT()
+	defer t.done()
 
 	createSchema := func(ctx context.Context, dsn string) error {
 		conn, err := pgxpool.New(ctx, dsn)
