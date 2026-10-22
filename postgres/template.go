@@ -221,7 +221,6 @@ func LoadSQLFile(path string) func(string) error {
 //	        testdb.WithTemplate("with_schema"))
 //	    // Schema already applied - fast clone!
 //	}
-//
 func LoadMigrations(dir string, tool testdb.MigrationTool) func(string) error {
 	return func(dsn string) error {
 		switch tool {
