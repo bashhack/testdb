@@ -700,8 +700,8 @@ func (m *mockErrorProvider) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockErrorProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error {
-	return errors.New("templates not supported in mock")
+func (m *mockErrorProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) (string, error) {
+	return "", errors.New("templates not supported in mock")
 }
 
 func (m *mockErrorProvider) TemplateExists(ctx context.Context, name string) (bool, error) {
@@ -772,8 +772,8 @@ func (m *mockProvider) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error {
-	return nil
+func (m *mockProvider) CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) (string, error) {
+	return name, nil
 }
 
 func (m *mockProvider) TemplateExists(ctx context.Context, name string) (bool, error) {
