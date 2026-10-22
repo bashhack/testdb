@@ -9,6 +9,57 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ExecuteTernMigrations runs tern migrations against a database.
+// This is exported so it can be used by postgres.LoadMigrations for template creation.
+//
+// Tern requires parsing the DSN to extract connection details and database name.
+func ExecuteTernMigrations(dsn, migrationDir, ternPath string) error {
+	if ternPath == "" {
+		ternPath = "tern"
+	}
+
+	// Parse DSN to get connection details
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("parse DSN: %w", err)
+	}
+
+	if config.Host == "" || config.Port == 0 || config.User == "" || config.Password == "" {
+		return fmt.Errorf("incomplete DSN: host, port, user and password must be specified")
+	}
+
+	// Create temporary tern config file
+	confPath := filepath.Join(os.TempDir(), fmt.Sprintf("tern_%s.conf", config.Database))
+	confContent := fmt.Sprintf(`[database]
+host = %s
+port = %d
+database = %s
+user = %s
+password = %s`,
+		config.Host,
+		config.Port,
+		config.Database,
+		config.User,
+		config.Password)
+
+	if err := os.WriteFile(confPath, []byte(confContent), 0644); err != nil {
+		return fmt.Errorf("write tern config: %w", err)
+	}
+	defer func() { _ = os.Remove(confPath) }()
+
+	// Execute tern migrate
+	cmd := exec.Command(ternPath, "migrate",
+		"-c", confPath,
+		"-m", migrationDir)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tern migrate failed: %w\nOutput: %s", err, output)
+	}
+
+	return nil
+}
+
 // runTernMigrations executes migrations using the Tern migration tool.
 // Tern is PostgreSQL-specific and supports advanced features like configurable migrations.
 //
@@ -21,62 +72,48 @@ import (
 //  4. Captures and returns any migration errors
 //  5. Cleans up temporary files
 func (td *TestDatabase) runTernMigrations() error {
-	adminDSN := td.provider.ResolvedAdminDSN()
+	ternPath := td.config.MigrationToolPath
+	if ternPath == "" {
+		ternPath = "tern"
+	}
 
-	config, err := pgx.ParseConfig(adminDSN)
+	err := ExecuteTernMigrations(td.dsn, td.config.MigrationDir, ternPath)
 	if err != nil {
 		return &Error{
 			Op:  "runTernMigrations",
-			Err: fmt.Errorf("parse admin DSN: %w", err),
-		}
-	}
-
-	if config.Host == "" || config.Port == 0 || config.User == "" || config.Password == "" {
-		return &Error{
-			Op:  "runTernMigrations",
-			Err: fmt.Errorf("incomplete admin DSN: host, port, user and password must be specified"),
-		}
-	}
-
-	confPath := filepath.Join(os.TempDir(), fmt.Sprintf("tern_%s.conf", td.name))
-	confContent := fmt.Sprintf(`[database]
-host = %s
-port = %d
-database = %s
-user = %s
-password = %s`,
-		config.Host,
-		config.Port,
-		td.name,
-		config.User,
-		config.Password)
-
-	if err := os.WriteFile(confPath, []byte(confContent), 0644); err != nil {
-		return &Error{
-			Op:  "runTernMigrations",
-			Err: fmt.Errorf("write tern config: %w", err),
-		}
-	}
-	defer func() { _ = os.Remove(confPath) }()
-
-	ternPath := "tern"
-	if td.config.MigrationToolPath != "" {
-		ternPath = td.config.MigrationToolPath
-	}
-
-	cmd := exec.Command(ternPath, "migrate",
-		"-c", confPath,
-		"-m", td.config.MigrationDir)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return &Error{
-			Op:  "runTernMigrations",
-			Err: fmt.Errorf("tern migrate failed: %w\nOutput: %s", err, output),
+			Err: err,
 		}
 	}
 
 	td.logf("testdb: migrations completed for %s", td.name)
+	return nil
+}
+
+// ExecuteGooseMigrations runs goose migrations against a database.
+// This is exported so it can be used by postgres.LoadMigrations for template creation.
+func ExecuteGooseMigrations(dsn, migrationDir, goosePath string) error {
+	if goosePath == "" {
+		goosePath = "goose"
+	}
+
+	// Goose uses driver names: postgres, mysql, sqlite3
+	driver, err := driverFromDSN(dsn)
+	if err != nil {
+		return err
+	}
+
+	// Format: goose -dir <migration_dir> <driver> <dsn> up
+	cmd := exec.Command(goosePath,
+		"-dir", migrationDir,
+		driver,
+		dsn,
+		"up")
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("goose up failed: %w\nOutput: %s", err, output)
+	}
+
 	return nil
 }
 
@@ -90,13 +127,12 @@ password = %s`,
 //  2. Executes the goose CLI with appropriate arguments
 //  3. Captures and returns any migration errors
 func (td *TestDatabase) runGooseMigrations() error {
-	goosePath := "goose"
-	if td.config.MigrationToolPath != "" {
-		goosePath = td.config.MigrationToolPath
+	goosePath := td.config.MigrationToolPath
+	if goosePath == "" {
+		goosePath = "goose"
 	}
 
-	// Goose uses driver names: postgres, mysql, sqlite3
-	driver, err := driverFromDSN(td.dsn)
+	err := ExecuteGooseMigrations(td.dsn, td.config.MigrationDir, goosePath)
 	if err != nil {
 		return &Error{
 			Op:  "runGooseMigrations",
@@ -104,22 +140,40 @@ func (td *TestDatabase) runGooseMigrations() error {
 		}
 	}
 
-	// Format: goose -dir <migration_dir> <driver> <dsn> up
-	cmd := exec.Command(goosePath,
-		"-dir", td.config.MigrationDir,
-		driver,
-		td.dsn,
+	td.logf("testdb: migrations completed for %s", td.name)
+	return nil
+}
+
+// ExecuteMigrateMigrations runs golang-migrate migrations against a database.
+// This is exported so it can be used by postgres.LoadMigrations for template creation.
+func ExecuteMigrateMigrations(dsn, migrationDir, migratePath string) error {
+	if migratePath == "" {
+		migratePath = "migrate"
+	}
+
+	// Convert to absolute path if needed
+	if !filepath.IsAbs(migrationDir) {
+		absPath, err := filepath.Abs(migrationDir)
+		if err != nil {
+			return fmt.Errorf("get absolute path: %w", err)
+		}
+		migrationDir = absPath
+	}
+
+	// Build source URL (migrate requires file:// prefix)
+	sourceURL := fmt.Sprintf("file://%s", migrationDir)
+
+	// Format: migrate -source <source_url> -database <dsn> up
+	cmd := exec.Command(migratePath,
+		"-source", sourceURL,
+		"-database", dsn,
 		"up")
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return &Error{
-			Op:  "runGooseMigrations",
-			Err: fmt.Errorf("goose up failed: %w\nOutput: %s", err, output),
-		}
+		return fmt.Errorf("migrate up failed: %w\nOutput: %s", err, output)
 	}
 
-	td.logf("testdb: migrations completed for %s", td.name)
 	return nil
 }
 
@@ -133,37 +187,16 @@ func (td *TestDatabase) runGooseMigrations() error {
 //  2. Executes the migrate CLI with the DSN and source path
 //  3. Captures and returns any migration errors
 func (td *TestDatabase) runMigrateMigrations() error {
-	migratePath := "migrate"
-	if td.config.MigrationToolPath != "" {
-		migratePath = td.config.MigrationToolPath
+	migratePath := td.config.MigrationToolPath
+	if migratePath == "" {
+		migratePath = "migrate"
 	}
 
-	migrationDir := td.config.MigrationDir
-	if !filepath.IsAbs(migrationDir) {
-		absPath, err := filepath.Abs(migrationDir)
-		if err != nil {
-			return &Error{
-				Op:  "runMigrateMigrations",
-				Err: fmt.Errorf("get absolute path: %w", err),
-			}
-		}
-		migrationDir = absPath
-	}
-
-	// Build source URL (migrate requires file:// prefix)
-	sourceURL := fmt.Sprintf("file://%s", migrationDir)
-
-	// Format: migrate -source <source_url> -database <dsn> up
-	cmd := exec.Command(migratePath,
-		"-source", sourceURL,
-		"-database", td.dsn,
-		"up")
-
-	output, err := cmd.CombinedOutput()
+	err := ExecuteMigrateMigrations(td.dsn, td.config.MigrationDir, migratePath)
 	if err != nil {
 		return &Error{
 			Op:  "runMigrateMigrations",
-			Err: fmt.Errorf("migrate up failed: %w\nOutput: %s", err, output),
+			Err: err,
 		}
 	}
 

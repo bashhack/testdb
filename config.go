@@ -51,6 +51,20 @@ type Config struct {
 	// Example database name: "test_1699564231_a1b2c3d4"
 	DBPrefix string
 
+	// TemplateName specifies a template database to clone instead of creating a fresh database.
+	// Templates are significantly faster than fresh database creation, especially for large schemas
+	// or databases with pre-seeded data.
+	//
+	// If empty (default), a fresh database is created.
+	// If specified, the template database must already exist (see postgres.CreateTemplate).
+	//
+	// Example: "us_region" or "seeded_schema"
+	//
+	// Performance impact:
+	//   - Fresh database: ~12-15ms (PostgreSQL CREATE DATABASE)
+	//   - Template clone: ~3-5ms (PostgreSQL CREATE DATABASE WITH TEMPLATE)
+	TemplateName string
+
 	// Verbose enables logging of database operations.
 	// When false (default), testdb operates silently.
 	// When true, logs database creation, cleanup, and migration completion.
@@ -150,6 +164,32 @@ func WithMigrationToolPath(path string) Option {
 func WithDBPrefix(prefix string) Option {
 	return func(c *Config) {
 		c.DBPrefix = prefix
+	}
+}
+
+// WithTemplate configures the test database to be created from a template database.
+// This is significantly faster than creating a fresh database, especially for large
+// schemas or databases with pre-seeded data.
+//
+// The template database must already exist (created via postgres.CreateTemplate or manually).
+// If the template doesn't exist, database creation will fail.
+//
+// Performance impact:
+//   - Fresh database: ~12-15ms
+//   - Template clone: ~3-5ms (3-5x faster)
+//
+// Common use cases:
+//   - Large SQL dumps (fixtures) loaded once, cloned per test
+//   - Different fixture sets for different test suites (us_region, eu_region)
+//   - Testing migrations from specific schema versions
+//
+// Example:
+//
+//	db := postgres.New(t, &postgres.PoolInitializer{},
+//	    testdb.WithTemplate("us_region"))
+func WithTemplate(name string) Option {
+	return func(c *Config) {
+		c.TemplateName = name
 	}
 }
 

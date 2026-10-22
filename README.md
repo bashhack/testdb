@@ -312,6 +312,125 @@ postgres.Setup(t,
 )
 ```
 
+## Templates
+
+Templates allow you to create a database once and clone it for each test. This avoids repeatedly running migrations or loading fixture data.
+
+### When to Use Templates
+
+Use templates when:
+- Your migrations are slow to run
+- You have large SQL fixture files to load
+- You need the same database setup for many tests
+
+### Basic Template Usage
+
+Create templates in `TestMain` and use them in individual tests:
+
+```go
+func TestMain(m *testing.M) {
+    ctx := context.Background()
+
+    // Create template once with migrations
+    postgres.CreateTemplate(ctx, "with_schema",
+        postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose))
+
+    code := m.Run()
+
+    // Cleanup
+    postgres.DropTemplate(ctx, "with_schema")
+    os.Exit(code)
+}
+
+func TestUsers(t *testing.T) {
+    // Clone from template - schema already applied
+    db := postgres.New(t, &postgres.PoolInitializer{},
+        testdb.WithTemplate("with_schema"))
+
+    pool := db.Entity().(*pgxpool.Pool)
+    // Start testing immediately
+}
+```
+
+### Template with SQL Files
+
+Load SQL dumps or fixture data:
+
+```go
+postgres.CreateTemplate(ctx, "with_fixtures",
+    postgres.LoadSQLFile("fixtures/seed_data.sql"))
+```
+
+### Template with Custom Setup
+
+Use Go code for programmatic data generation:
+
+```go
+setupFunc := func(dsn string) error {
+    pool, err := pgxpool.New(context.Background(), dsn)
+    if err != nil {
+        return err
+    }
+    defer pool.Close()
+
+    // Create schema and seed data
+    _, err = pool.Exec(context.Background(), `
+        CREATE TABLE test_data (id SERIAL PRIMARY KEY, value INT);
+    `)
+    return err
+}
+
+postgres.CreateTemplate(ctx, "custom", setupFunc)
+```
+
+### Composite Templates
+
+Combine migrations and fixtures:
+
+```go
+setupFunc := func(dsn string) error {
+    // First run migrations
+    if err := postgres.LoadMigrations("./migrations", testdb.MigrationToolGoose)(dsn); err != nil {
+        return err
+    }
+    // Then load fixtures
+    return postgres.LoadSQLFile("fixtures/data.sql")(dsn)
+}
+
+postgres.CreateTemplate(ctx, "full", setupFunc)
+```
+
+### Multiple Templates
+
+Use different templates for different test scenarios:
+
+```go
+func TestMain(m *testing.M) {
+    ctx := context.Background()
+
+    postgres.CreateTemplate(ctx, "us_region", postgres.LoadSQLFile("fixtures/us.sql"))
+    postgres.CreateTemplate(ctx, "eu_region", postgres.LoadSQLFile("fixtures/eu.sql"))
+
+    code := m.Run()
+
+    postgres.DropTemplate(ctx, "us_region")
+    postgres.DropTemplate(ctx, "eu_region")
+    os.Exit(code)
+}
+
+func TestUSCheckout(t *testing.T) {
+    db := postgres.New(t, &postgres.PoolInitializer{},
+        testdb.WithTemplate("us_region"))
+    // Test with US data
+}
+
+func TestEUVAT(t *testing.T) {
+    db := postgres.New(t, &postgres.PoolInitializer{},
+        testdb.WithTemplate("eu_region"))
+    // Test with EU data
+}
+```
+
 ## How It Works
 
 testdb leverages PostgreSQL's `CREATE DATABASE` command for true isolation:

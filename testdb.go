@@ -110,8 +110,21 @@ type Provider interface {
 	// CreateDatabase creates a new database with the given name.
 	CreateDatabase(ctx context.Context, name string) error
 
+	// CreateDatabaseFromTemplate creates a new database by cloning a template.
+	// This is significantly faster than CreateDatabase for databases with large schemas
+	// or pre-seeded data. The template database must already exist.
+	//
+	// Providers that don't support templates should return an error.
+	CreateDatabaseFromTemplate(ctx context.Context, name, templateName string) error
+
 	// DropDatabase drops an existing database.
 	DropDatabase(ctx context.Context, name string) error
+
+	// TemplateExists checks if a template database exists.
+	// This is useful for debugging and conditional template creation.
+	//
+	// Providers that don't support templates should return false, nil.
+	TemplateExists(ctx context.Context, name string) (bool, error)
 
 	// TerminateConnections forcefully closes all connections to a database.
 	// This is necessary before dropping a database.
@@ -287,13 +300,27 @@ func New(t testing.TB, provider Provider, initializer DBInitializer, opts ...Opt
 	}
 
 	if cfg.Verbose {
-		t.Logf("testdb: creating database %s", dbName)
+		if cfg.TemplateName != "" {
+			t.Logf("testdb: creating database %s from template %s", dbName, cfg.TemplateName)
+		} else {
+			t.Logf("testdb: creating database %s", dbName)
+		}
 	}
 
-	if err := provider.CreateDatabase(ctx, dbName); err != nil {
-		return nil, &Error{
-			Op:  "provider.CreateDatabase",
-			Err: err,
+	// Use template if specified, otherwise create fresh database
+	if cfg.TemplateName != "" {
+		if err := provider.CreateDatabaseFromTemplate(ctx, dbName, cfg.TemplateName); err != nil {
+			return nil, &Error{
+				Op:  "provider.CreateDatabaseFromTemplate",
+				Err: err,
+			}
+		}
+	} else {
+		if err := provider.CreateDatabase(ctx, dbName); err != nil {
+			return nil, &Error{
+				Op:  "provider.CreateDatabase",
+				Err: err,
+			}
 		}
 	}
 
